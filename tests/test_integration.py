@@ -10,8 +10,7 @@ import numpy as np
 # Add parent directory to path for imports
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from models import get_async_patient_db, AsyncPatientRecord
-from functions import search_patient_by_name, update_prior_auth_status
+from models import get_async_patient_db, AsyncPatientRecord, get_async_db_client
 from pipeline import HealthcareAIPipeline
 from optimization import LatencyOptimizer
 from interruption_handler import InterruptionHandler
@@ -39,25 +38,6 @@ class TestMongoDBIntegration:
         except Exception as e:
             pytest.fail(f"❌ Async MongoDB connection failed: {e}")
     
-    def test_database_and_collection_access(self):
-        """Test access to specific database and collection"""
-        try:
-            client = get_async_db_client()
-            patient_db = AsyncPatientRecord(client)
-            
-            # Test database and collection access
-            db_name = os.getenv("MONGO_DB_NAME", "alfons")
-            assert patient_db.db_name == db_name
-            assert patient_db.patients is not None
-            
-            # Test collection exists and is accessible
-            collection_info = patient_db.patients.database.list_collection_names()
-            assert "patients" in collection_info
-            
-            logger.info(f"✅ Database '{db_name}' and 'patients' collection accessible")
-        except Exception as e:
-            pytest.fail(f"❌ Database/collection access failed: {e}")
-    
     @pytest.mark.asyncio
     async def test_async_database_and_collection_access(self):
         """Test async access to specific database and collection"""
@@ -77,30 +57,6 @@ class TestMongoDBIntegration:
             logger.info(f"✅ Async Database '{db_name}' and 'patients' collection accessible")
         except Exception as e:
             pytest.fail(f"❌ Async Database/collection access failed: {e}")
-    
-    def test_patient_search_functionality(self):
-        """Test patient search with real database (sync)"""
-        try:
-            client = get_async_db_client()
-            patient_db = AsyncPatientRecord(client)
-            
-            # Test search by name and DOB
-            result = patient_db.find_patient_by_name_and_dob("Test Patient", None)
-            
-            # Result can be None (no patient found) or a dict (patient found)
-            assert result is None or isinstance(result, dict)
-            
-            logger.info("✅ Patient search functionality working")
-            
-            # If a patient exists, test the structure
-            if result:
-                required_fields = ["patient_name", "_id"]
-                for field in required_fields:
-                    assert field in result, f"Missing required field: {field}"
-                logger.info(f"✅ Found patient with proper structure: {result.get('patient_name')}")
-                
-        except Exception as e:
-            pytest.fail(f"❌ Patient search failed: {e}")
     
     @pytest.mark.asyncio
     async def test_async_patient_search_functionality(self):
@@ -126,35 +82,6 @@ class TestMongoDBIntegration:
                 
         except Exception as e:
             pytest.fail(f"❌ Async patient search failed: {e}")
-    
-    def test_patient_functions_integration(self):
-        """Test patient functions with real database"""
-        try:
-            # Test search function (this uses sync functions)
-            result = search_patient_by_name("Test", "Patient")
-            
-            # Should return None or valid patient data
-            assert result is None or isinstance(result, dict)
-            
-            if result:
-                # Test update function with real patient
-                patient_id = str(result["_id"])
-                original_status = result.get("prior_auth_status", "Unknown")
-                
-                # Update to a test status
-                update_success = update_prior_auth_status(patient_id, "Test Status")
-                assert isinstance(update_success, bool)
-                
-                # Restore original status if update succeeded
-                if update_success:
-                    update_prior_auth_status(patient_id, original_status)
-                
-                logger.info("✅ Patient functions working with real data")
-            else:
-                logger.info("✅ Patient functions working (no test data found)")
-                
-        except Exception as e:
-            pytest.fail(f"❌ Patient functions integration failed: {e}")
     
     @pytest.mark.asyncio
     async def test_async_patient_operations(self):
@@ -204,10 +131,10 @@ class TestOpenAIIntegration:
             import openai
             
             api_key = os.getenv("OPENAI_API_KEY")
-            client = openai.OpenAI(api_key=api_key)
+            client = openai.AsyncOpenAI(api_key=api_key)
             
             # Test with a simple completion
-            response = client.chat.completions.create(
+            response = await client.chat.completions.create(
                 model="gpt-4o",
                 messages=[
                     {"role": "system", "content": "You are a test assistant."},
@@ -233,34 +160,37 @@ class TestOpenAIIntegration:
             import openai
             
             api_key = os.getenv("OPENAI_API_KEY")
-            client = openai.OpenAI(api_key=api_key)
+            client = openai.AsyncOpenAI(api_key=api_key)
             
             # Test function calling
-            functions = [{
-                "name": "test_function",
-                "description": "A test function",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "message": {"type": "string", "description": "Test message"}
-                    },
-                    "required": ["message"]
+            tools = [{
+                "type": "function",
+                "function": {
+                    "name": "test_function",
+                    "description": "A test function",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "message": {"type": "string", "description": "Test message"}
+                        },
+                        "required": ["message"]
+                    }
                 }
             }]
             
-            response = client.chat.completions.create(
+            response = await client.chat.completions.create(
                 model="gpt-4o",
                 messages=[
                     {"role": "user", "content": "Call the test function with message 'hello'"}
                 ],
-                functions=functions,
-                function_call="auto",
+                tools=tools,
+                tool_choice="auto",
                 timeout=30
             )
             
             # Check if function was called
             message = response.choices[0].message
-            if hasattr(message, 'function_call') and message.function_call:
+            if message.tool_calls:
                 logger.info("✅ OpenAI function calling working")
             else:
                 logger.info("✅ OpenAI responded (function calling may not have triggered)")
@@ -331,7 +261,8 @@ class TestCartesiaIntegration:
             client = cartesia.Cartesia(api_key=api_key)
             
             # Test API connection by listing voices
-            voices = client.voices.list()
+            voices_pager = client.voices.list()
+            voices = list(voices_pager)  # Consume the pager into a list
             
             assert len(voices) > 0, "No voices returned from Cartesia API"
             

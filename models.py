@@ -8,6 +8,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 class AsyncPatientRecord:
+    """Asynchronous PatientRecord class"""
     def __init__(self, db_client: AsyncIOMotorClient):
         self.client = db_client
         self.db_name = os.getenv("MONGO_DB_NAME", "alfons")
@@ -70,7 +71,6 @@ class AsyncPatientRecord:
         except:
             return False
 
-# Initialize async MongoDB connection
 def get_async_db_client():
     """Get asynchronous MongoDB client"""
     mongo_uri = os.getenv("MONGO_URI", "mongodb://localhost:27017/")

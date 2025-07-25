@@ -265,7 +265,7 @@ class HealthcareAIPipeline:
         tts_service.process_frame = interruption_aware_tts
         return tts_service
     
-    def _handle_function_call(self, function_name: str, arguments: Dict[str, Any]) -> str:
+    async def _handle_function_call(self, function_name: str, arguments: Dict[str, Any]) -> str:
         """Handle LLM function calls with optimization and caching"""
         start_time = time.time()
         
@@ -280,7 +280,7 @@ class HealthcareAIPipeline:
                 logger.info(f"Calling function: {function_name} with args: {arguments}")
                 
                 # Execute the function
-                result = FUNCTION_REGISTRY[function_name](**arguments)
+                result = await FUNCTION_REGISTRY[function_name](**arguments)
                 
                 # Cache the result
                 self.optimizer.cache_function_result(function_name, arguments, result)
@@ -342,7 +342,7 @@ class HealthcareAIPipeline:
         # Interruption suggestions
         interruption_analytics = self.interruption_handler.get_interruption_analytics()
         if interruption_analytics.get("recent_interruptions", 0) > 3:
-            suggestions.append("High interruption rate - consider adjusting response pace")
+            suggestions.append("Highinterruption rate - consider adjusting response pace")
         
         return suggestions
     

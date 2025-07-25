@@ -6,10 +6,9 @@ from models import get_async_patient_db, AsyncPatientRecord
 logger = logging.getLogger(__name__)
 
 # Initialize database connection
-db_client = get_db_client()
-patient_db = PatientRecord(db_client)
+patient_db = get_async_patient_db()
 
-def search_patient_by_name(first_name: str, last_name: str) -> Optional[Dict[str, Any]]:
+async def search_patient_by_name(first_name: str, last_name: str) -> Optional[Dict[str, Any]]:
     """
     Search for a patient by first and last name.
     Returns patient data if found, None if not found.
@@ -19,11 +18,11 @@ def search_patient_by_name(first_name: str, last_name: str) -> Optional[Dict[str
     try:
         # Combine first and last name for search
         full_name = f"{first_name} {last_name}"
-        patient = patient_db.find_patient_by_name_and_dob(full_name, None)
+        patient = await patient_db.find_patient_by_name_and_dob(full_name, None)
         
         # If exact match not found, try case-insensitive search
         if not patient:
-            patient = patient_db.patients.find_one({
+            patient = await patient_db.patients.find_one({
                 "patient_name": {"$regex": f"^{full_name}$", "$options": "i"}
             })
         
@@ -41,7 +40,7 @@ def search_patient_by_name(first_name: str, last_name: str) -> Optional[Dict[str
         logger.error(f"Error searching for patient {first_name} {last_name}: {e}")
         return None
 
-def update_prior_auth_status(patient_id: str, status: str) -> bool:
+async def update_prior_auth_status(patient_id: str, status: str) -> bool:
     """
     Update the prior authorization status for a patient.
     
@@ -55,7 +54,7 @@ def update_prior_auth_status(patient_id: str, status: str) -> bool:
     start_time = time.time()
     
     try:
-        success = patient_db.update_prior_auth_status(patient_id, status)
+        success = await patient_db.update_prior_auth_status(patient_id, status)
         
         latency = (time.time() - start_time) * 1000
         logger.info(f"Prior auth update latency: {latency:.2f}ms")
