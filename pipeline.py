@@ -10,16 +10,25 @@ from pipecat.transports.services.livekit import LiveKitTransport, LiveKitParams
 import os
 import time
 import logging
-from typing import Callable
+from typing import Callable, Dict, Any
+
+from functions import PATIENT_FUNCTIONS, FUNCTION_REGISTRY
+from workflow import HealthcareWorkflow
+from memory import ConversationMemory
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 class HealthcareAIPipeline:
-    def __init__(self):
+    def __init__(self, session_id: str = "default"):
         self.transport = None
         self.pipeline = None
         self.runner = None
+        self.session_id = session_id
+        
+        # Initialize workflow and memory
+        self.workflow = HealthcareWorkflow()
+        self.memory = ConversationMemory()
         
     def create_pipeline(self) -> Pipeline:
         """Create the core Pipecat pipeline with healthcare AI components"""
@@ -41,22 +50,21 @@ class HealthcareAIPipeline:
             language="en-US"
         )
         
-        # LLM Service with healthcare system prompt
-        system_prompt = """You are MyRobot, a healthcare AI assistant for prior authorization. 
-        Your role is to:
-        1. Verify patient details (name, DOB, insurance info)
-        2. Extract procedure codes and medical information
-        3. Gather symptoms and medical justification
-        4. Be professional, empathetic, and HIPAA-compliant
-        5. Keep responses concise for voice interaction
+        # Initialize conversation with system prompt
+        system_prompt = self.workflow.get_system_prompt()
+        self.memory.add_system_message(system_prompt)
         
-        Always confirm patient identity before proceeding with medical information."""
-        
+        # LLM Service with function calling
         llm = OpenAILLMService(
             api_key=os.getenv("OPENAI_API_KEY"),
             model="gpt-4o",
-            messages=[{"role": "system", "content": system_prompt}]
+            messages=self.memory.get_messages_for_llm(),
+            functions=PATIENT_FUNCTIONS,  # Enable function calling
+            function_call="auto"
         )
+        
+        # Add function call handler
+        llm.function_call_handler = self._handle_function_call
         
         # TTS Service
         tts = CartesiaTTSService(
@@ -65,7 +73,7 @@ class HealthcareAIPipeline:
             model_id="sonic-english"
         )
         
-        # Create pipeline without VAD for now
+        # Create pipeline
         self.pipeline = Pipeline([
             self.transport.input(),
             stt,
@@ -76,19 +84,78 @@ class HealthcareAIPipeline:
         
         return self.pipeline
     
+    def _handle_function_call(self, function_name: str, arguments: Dict[str, Any]) -> str:
+        """Handle LLM function calls"""
+        start_time = time.time()
+        
+        try:
+            if function_name in FUNCTION_REGISTRY:
+                logger.info(f"Calling function: {function_name} with args: {arguments}")
+                
+                # Execute the function
+                result = FUNCTION_REGISTRY[function_name](**arguments)
+                
+                # Update workflow state based on function results
+                if function_name == "search_patient_by_name" and result:
+                    self.workflow.update_patient_data(result)
+                    self.workflow.advance_state()
+                elif function_name == "update_prior_auth_status":
+                    self.workflow.add_collected_info("auth_status_updated", result)
+                    self.workflow.advance_state()
+                
+                # Update system prompt for new workflow state
+                new_prompt = self.workflow.get_system_prompt()
+                self.memory.add_system_message(new_prompt)
+                
+                latency = (time.time() - start_time) * 1000
+                logger.info(f"Function call latency: {latency:.2f}ms")
+                
+                return str(result) if result else "Function executed successfully"
+            else:
+                logger.error(f"Unknown function: {function_name}")
+                return f"Error: Unknown function {function_name}"
+                
+        except Exception as e:
+            logger.error(f"Error calling function {function_name}: {e}")
+            return f"Error executing function: {str(e)}"
+    
     def _add_latency_logging(self, service, stage_name: str):
         """Add latency logging wrapper around service"""
         original_process = service.process_frame
         
         async def logged_process(frame):
             start_time = time.time()
+            
+            # Add conversation memory handling for user messages
+            if hasattr(frame, 'text') and frame.text:
+                self.memory.add_message("user", frame.text)
+                
+                # Check if workflow suggests function call
+                suggested_function = self.workflow.should_use_function(frame.text)
+                if suggested_function:
+                    logger.info(f"Workflow suggests function: {suggested_function}")
+            
             result = await original_process(frame)
+            
+            # Add assistant response to memory
+            if hasattr(result, 'text') and result.text:
+                self.memory.add_message("assistant", result.text)
+            
             latency = (time.time() - start_time) * 1000
             logger.info(f"{stage_name} latency: {latency:.2f}ms")
             return result
         
         service.process_frame = logged_process
         return service
+    
+    def get_conversation_state(self) -> Dict[str, Any]:
+        """Get current conversation state"""
+        return {
+            "workflow_state": self.workflow.state.value,
+            "workflow_context": self.workflow.get_workflow_context(),
+            "conversation_summary": self.memory.get_conversation_summary(),
+            "session_id": self.session_id
+        }
     
     async def run(self, room_url: str, token: str):
         """Run the pipeline with given LiveKit room and token"""
@@ -101,5 +168,5 @@ class HealthcareAIPipeline:
         task = PipelineTask(self.pipeline)
         self.runner = PipelineRunner()
         
-        logger.info(f"Starting healthcare AI pipeline for room: {room_url}")
+        logger.info(f"Starting healthcare AI pipeline for session: {self.session_id}")
         await self.runner.run(task)
