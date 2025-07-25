@@ -1,7 +1,7 @@
 import time
 import logging
 from typing import Optional, Dict, Any
-from models import get_db_client, PatientRecord
+from models import get_async_patient_db, AsyncPatientRecord
 
 logger = logging.getLogger(__name__)
 
