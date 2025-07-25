@@ -267,6 +267,8 @@ class AudioProcessor:
         echo_rate = sum(1 for m in recent_metrics if m.echo_detected) / len(recent_metrics)
         voice_activity_rate = sum(1 for m in recent_metrics if m.voice_activity) / len(recent_metrics)
         
+        status = "good" if avg_quality > 0.8 else "fair" if avg_quality > 0.5 else "poor"
+        
         return {
             "average_quality_score": float(avg_quality),
             "average_noise_level": float(avg_noise),
@@ -274,8 +276,9 @@ class AudioProcessor:
             "echo_detection_rate": float(echo_rate),
             "voice_activity_rate": float(voice_activity_rate),
             "background_noise_level": float(self.background_noise_level),
-            "measurements_count": len(recent_metrics),
-            "quality_trend": self._calculate_quality_trend()
+            "chunk_count": len(self.quality_history),
+            "quality_trend": self._calculate_quality_trend(),
+            "status": status
         }
     
     def _calculate_quality_trend(self) -> str:
@@ -308,6 +311,7 @@ class AudioProcessor:
         recent_metrics = self.quality_history[-10:]
         avg_quality = np.mean([m.quality_score for m in recent_metrics])
         avg_noise = np.mean([m.noise_level for m in recent_metrics])
+        avg_signal = np.mean([m.signal_strength for m in recent_metrics])
         echo_rate = sum(1 for m in recent_metrics if m.echo_detected) / len(recent_metrics)
         
         if avg_quality < 0.6:
@@ -321,6 +325,9 @@ class AudioProcessor:
         
         if self.background_noise_level > 0.15:
             suggestions.append("Consistent background noise - consider using a headset")
+        
+        if avg_signal < 0.1:
+            suggestions.append("Low volume detected - increase microphone volume")
         
         if not suggestions:
             suggestions.append("Audio quality is good")

@@ -34,7 +34,7 @@ class InterruptionHandler:
         self.is_ai_speaking = False
         
         # Interruption detection keywords
-        self.clarification_keywords = ["what", "sorry", "pardon", "repeat", "again", "clarify"]
+        self.clarification_keywords = ["sorry", "pardon", "repeat", "again", "clarify"]
         self.correction_keywords = ["no", "wrong", "actually", "correct", "mistake"]
         self.topic_change_keywords = ["but", "however", "instead", "what about", "different"]
     
@@ -79,17 +79,17 @@ class InterruptionHandler:
         
         user_input_lower = user_input.lower()
         
-        # Check for clarification requests
-        if any(keyword in user_input_lower for keyword in self.clarification_keywords):
-            return InterruptionType.CLARIFICATION_REQUEST
+        # Check for topic changes first (more specific phrases)
+        if any(keyword in user_input_lower for keyword in self.topic_change_keywords):
+            return InterruptionType.TOPIC_CHANGE
         
         # Check for corrections
         if any(keyword in user_input_lower for keyword in self.correction_keywords):
             return InterruptionType.CORRECTION
         
-        # Check for topic changes
-        if any(keyword in user_input_lower for keyword in self.topic_change_keywords):
-            return InterruptionType.TOPIC_CHANGE
+        # Check for clarification requests
+        if any(keyword in user_input_lower for keyword in self.clarification_keywords):
+            return InterruptionType.CLARIFICATION_REQUEST
         
         # Check for user interruption during AI speech
         if response_duration < estimated_completion * 0.7:  # Interrupted before 70% completion
@@ -189,8 +189,6 @@ class InterruptionHandler:
             if time.time() - event.timestamp < 300  # Last 5 minutes
         ]
         
-        interruption_rate = len(recent_interruptions) / max(len(self.interruption_history), 1)
-        
         adjustments = {
             "speech_rate": "normal",
             "pause_duration": 1.0,
@@ -198,7 +196,7 @@ class InterruptionHandler:
             "confirmation_frequency": "normal"
         }
         
-        if interruption_rate > 0.3:  # High interruption rate
+        if interruption_frequency > 0.3:  # High interruption rate
             adjustments.update({
                 "speech_rate": "slower",
                 "pause_duration": 1.5,
@@ -207,7 +205,7 @@ class InterruptionHandler:
             })
             logger.info("Adjusted to slower, more confirmatory speech pattern")
             
-        elif interruption_rate < 0.1:  # Low interruption rate
+        elif interruption_frequency < 0.1:  # Low interruption rate
             adjustments.update({
                 "speech_rate": "normal",
                 "pause_duration": 0.8,

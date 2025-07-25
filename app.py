@@ -1,11 +1,16 @@
 import os
 import logging
+import traceback
+import asyncio
+import datetime
+from livekit import api
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from dotenv import load_dotenv
 import uvicorn
 import uuid
+from urllib.parse import urlparse, parse_qs
 
 from pipeline import HealthcareAIPipeline
 from models import get_async_patient_db, AsyncPatientRecord
@@ -22,8 +27,7 @@ logger = logging.getLogger(__name__)
 app = FastAPI(title="Healthcare AI Agent", version="1.0.0")
 
 # Global instances
-db_client = get_db_client()
-patient_db = PatientRecord(db_client)
+patient_db = get_async_patient_db()
 memory_manager = MemoryManager()
 evaluator = HealthcareEvaluator()
 active_pipelines = {}
@@ -34,26 +38,76 @@ class CallRequest(BaseModel):
     session_id: str = None
 
 @app.post("/start-call")
-async def start_call(request: CallRequest):
-    """Start a healthcare AI call session"""
+async def start_call(request: CallRequest = None):  # Make request optional for simplicity
+    """Start a healthcare AI call session, auto-creating room and tokens"""
     try:
-        # Generate session ID if not provided
-        session_id = request.session_id or str(uuid.uuid4())
+        # Generate session ID
+        session_id = str(uuid.uuid4())
         
         logger.info(f"Starting optimized call for session: {session_id}")
         
-        # Create optimized pipeline for this session
+        # Initialize LiveKit API client
+        lk_api = api.LiveKitAPI(
+            url=os.getenv("LIVEKIT_URL").replace("wss://", "https://"),
+            api_key=os.getenv("LIVEKIT_API_KEY"),
+            api_secret=os.getenv("LIVEKIT_API_SECRET")
+        )
+
+        # Create a room
+        room_name = f"healthcare-ai-session-{session_id[:8]}"  # Unique per session
+        room = await lk_api.room.create_room(api.CreateRoomRequest(name=room_name))
+        base_url = os.getenv("LIVEKIT_URL")
+        room_url = f"{base_url}?room={room_name}"
+
+        # Generate bot token
+        bot_token = api.AccessToken(
+            os.getenv("LIVEKIT_API_KEY"),
+            os.getenv("LIVEKIT_API_SECRET")
+        ).with_identity("healthcare-bot") \
+         .with_ttl(datetime.timedelta(seconds=3600)) \
+         .with_grants(
+            api.VideoGrants(
+                room_join=True,
+                room=room_name,
+                can_publish=True,
+                can_subscribe=True
+            )
+        ).to_jwt()
+
+        # Generate user token
+        user_token = api.AccessToken(
+            os.getenv("LIVEKIT_API_KEY"),
+            os.getenv("LIVEKIT_API_SECRET")
+        ).with_identity("user") \
+         .with_ttl(datetime.timedelta(seconds=3600)) \
+         .with_grants(
+            api.VideoGrants(
+                room_join=True,
+                room=room_name,
+                can_publish=True,
+                can_subscribe=True
+            )
+        ).to_jwt()
+
+        # Close API client
+        await lk_api.aclose()
+
+        # Create and run pipeline
         pipeline = HealthcareAIPipeline(session_id=session_id)
         active_pipelines[session_id] = pipeline
+        asyncio.create_task(pipeline.run(base_url, bot_token, room_name))
         
-        # Start the pipeline
-        await pipeline.run(request.room_url, request.token)
-        
-        return {"status": "success", "session_id": session_id, "message": "Optimized call started successfully"}
+        return {
+            "status": "success",
+            "session_id": session_id,
+            "room_url": room_url,
+            "user_token": user_token,
+            "message": "Call started successfully. Use user_token to join the room."
+        }
         
     except Exception as e:
-        logger.error(f"Error starting call: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error(f"Error starting call: {str(e)}\n{traceback.format_exc()}")
+        raise HTTPException(status_code=500, detail=f"Failed to start call: {str(e)}")
 
 @app.get("/conversation-state/{session_id}")
 async def get_conversation_state(session_id: str):

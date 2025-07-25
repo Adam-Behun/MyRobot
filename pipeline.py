@@ -8,11 +8,12 @@ from pipecat.services.cartesia.tts import CartesiaTTSService
 from pipecat.transports.services.livekit import LiveKitTransport, LiveKitParams
 
 import os
+import sys
 import time
 import logging
 import asyncio
-from typing import Callable, Dict, Any, Optional, List
 import numpy as np
+from typing import Callable, Dict, Any, Optional, List
 
 from functions import PATIENT_FUNCTIONS, FUNCTION_REGISTRY
 from workflow import HealthcareWorkflow
@@ -23,6 +24,13 @@ from audio_processing import AudioProcessor
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+class CustomPipelineRunner(PipelineRunner):
+    def _setup_sigint(self):
+        if sys.platform == 'win32':
+            logger.warning("Signal handling not supported on Windows. Use task manager or endpoint to end sessions.")
+            return
+        super()._setup_sigint()
 
 class HealthcareAIPipeline:
     def __init__(self, session_id: str = "default"):
@@ -44,18 +52,17 @@ class HealthcareAIPipeline:
         self.last_user_input_time = time.time()
         self.current_audio_chunk = None
         
-    def create_pipeline(self) -> Pipeline:
+    def create_pipeline(self, url: str, token: str, room_name: str) -> Pipeline:
         """Create the optimized Pipecat pipeline with healthcare AI components"""
+        logger.debug(f"Creating pipeline with url: {url}, room_name: {room_name}, token: {token[:10]}...")
         
         # Transport configuration
-        transport_params = LiveKitParams(
-            url=os.getenv("LIVEKIT_URL", "ws://localhost:7880"),
-            token="", # Will be set per call
+        params = LiveKitParams(
             api_key=os.getenv("LIVEKIT_API_KEY"),
             api_secret=os.getenv("LIVEKIT_API_SECRET")
         )
         
-        self.transport = LiveKitTransport(transport_params)
+        self.transport = LiveKitTransport(url, token, room_name, params=params)
         
         # STT Service
         stt = DeepgramSTTService(
@@ -73,7 +80,7 @@ class HealthcareAIPipeline:
             api_key=os.getenv("OPENAI_API_KEY"),
             model="gpt-4o",
             messages=self.memory.get_messages_for_llm(),
-            functions=PATIENT_FUNCTIONS,  # Enable function calling
+            functions=PATIENT_FUNCTIONS,
             function_call="auto"
         )
         
@@ -83,7 +90,7 @@ class HealthcareAIPipeline:
         # TTS Service
         tts = CartesiaTTSService(
             api_key=os.getenv("CARTESIA_API_KEY"),
-            voice_id="a0e99841-438c-4a64-b679-ae501e7d6091",  # Professional female voice
+            voice_id="a0e99841-438c-4a64-b679-ae501e7d6091",
             model_id="sonic-english"
         )
         
@@ -102,13 +109,13 @@ class HealthcareAIPipeline:
         """Add audio processing wrapper around STT service"""
         original_process = stt_service.process_frame
         
-        async def audio_processed_stt(frame):
+        async def audio_processed_stt(frame, direction):
             start_time = time.time()
             
             # Process audio if available
             if hasattr(frame, 'audio') and frame.audio is not None:
                 try:
-                    # Convert audio to numpy array (simplified)
+                    # Convert audio to numpy array
                     audio_data = np.frombuffer(frame.audio, dtype=np.float32)
                     
                     # Apply audio processing
@@ -124,7 +131,7 @@ class HealthcareAIPipeline:
                     logger.debug(f"Audio processing error: {e}")
             
             # Process with STT
-            result = await original_process(frame)
+            result = await original_process(frame, direction)
             
             # Track STT latency
             stt_latency = (time.time() - start_time) * 1000
@@ -134,12 +141,12 @@ class HealthcareAIPipeline:
         
         stt_service.process_frame = audio_processed_stt
         return stt_service
-    
+
     def _add_optimization_wrapper(self, llm_service, stage_name: str):
         """Add optimization wrapper around LLM service"""
         original_process = llm_service.process_frame
         
-        async def optimized_llm_process(frame):
+        async def optimized_llm_process(frame, direction):
             start_time = time.time()
             
             # Handle user input and conversation memory
@@ -193,7 +200,7 @@ class HealthcareAIPipeline:
                 
                 # Apply optimization if enabled
                 if optimization_settings.get("enable_parallel_processing"):
-                    # Prepare LLM context in parallel (simplified)
+                    # Prepare LLM context in parallel
                     context_prep = await self.optimizer._prepare_llm_context(
                         self.workflow.get_workflow_context()
                     )
@@ -206,9 +213,9 @@ class HealthcareAIPipeline:
                 if optimization_settings.get("cache_responses"):
                     cache_key = f"response_{self.workflow.state.value}_{hash(user_input[:20])}"
                     # Simplified caching logic
-                
+            
             # Process with LLM
-            result = await original_process(frame)
+            result = await original_process(frame, direction)
             
             # Add assistant response to memory
             if hasattr(result, 'text') and result.text:
@@ -225,12 +232,12 @@ class HealthcareAIPipeline:
         
         llm_service.process_frame = optimized_llm_process
         return llm_service
-    
+
     def _add_interruption_wrapper(self, tts_service):
         """Add interruption handling wrapper around TTS service"""
         original_process = tts_service.process_frame
         
-        async def interruption_aware_tts(frame):
+        async def interruption_aware_tts(frame, direction):
             start_time = time.time()
             
             # Check for silence timeout
@@ -249,12 +256,12 @@ class HealthcareAIPipeline:
                 len(self.interruption_handler.interruption_history)
             )
             
-            # Apply TTS adjustments (simplified)
+            # Apply TTS adjustments
             if adjustments.get("speech_rate") == "slower":
                 logger.debug("Applying slower speech rate")
             
             # Process with TTS
-            result = await original_process(frame)
+            result = await original_process(frame, direction)
             
             # Track TTS latency
             tts_latency = (time.time() - start_time) * 1000
@@ -342,20 +349,17 @@ class HealthcareAIPipeline:
         # Interruption suggestions
         interruption_analytics = self.interruption_handler.get_interruption_analytics()
         if interruption_analytics.get("recent_interruptions", 0) > 3:
-            suggestions.append("Highinterruption rate - consider adjusting response pace")
+            suggestions.append("High interruption rate - consider adjusting response pace")
         
         return suggestions
     
-    async def run(self, room_url: str, token: str):
+    async def run(self, url: str, token: str, room_name: str):
         """Run the optimized pipeline with given LiveKit room and token"""
         if not self.pipeline:
-            self.create_pipeline()
-        
-        # Update transport token
-        self.transport._params.token = token
+            self.create_pipeline(url, token, room_name)
         
         task = PipelineTask(self.pipeline)
-        self.runner = PipelineRunner()
+        self.runner = CustomPipelineRunner()
         
         logger.info(f"Starting optimized healthcare AI pipeline for session: {self.session_id}")
         await self.runner.run(task)

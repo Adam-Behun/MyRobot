@@ -24,7 +24,7 @@ class HealthcareWorkflow:
         """Get system prompt based on current conversation state"""
         
         base_prompt = """You are MyRobot, a healthcare AI assistant for prior authorization calls. 
-You are professional, empathetic, and HIPAA-compliant. Keep responses concise for voice interaction."""
+                         You are professional, empathetic, and HIPAA-compliant. Keep responses concise for voice interaction."""
         
         state_prompts = {
             ConversationState.GREETING: """

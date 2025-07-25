@@ -1,7 +1,7 @@
 import pytest
 import os
 import sys
-from unittest.mock import Mock, patch, MagicMock
+from unittest.mock import patch, AsyncMock
 
 # Add parent directory to path for imports
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -10,8 +10,9 @@ from functions import search_patient_by_name, update_prior_auth_status, PATIENT_
 
 class TestPatientFunctions:
     
+    @pytest.mark.asyncio
     @patch('functions.patient_db')
-    def test_search_patient_by_name_found(self, mock_patient_db):
+    async def test_search_patient_by_name_found(self, mock_patient_db):
         """Test successful patient search by name"""
         # Mock patient data
         mock_patient = {
@@ -21,27 +22,29 @@ class TestPatientFunctions:
             "prior_auth_status": "Pending"
         }
         
-        mock_patient_db.find_patient_by_name_and_dob.return_value = mock_patient
+        mock_patient_db.find_patient_by_name_and_dob = AsyncMock(return_value=mock_patient)
         
-        result = search_patient_by_name("John", "Doe")
+        result = await search_patient_by_name("John", "Doe")
         
         assert result is not None
         assert result["patient_name"] == "John Doe"
         assert result["_id"] == "507f1f77bcf86cd799439011"
         mock_patient_db.find_patient_by_name_and_dob.assert_called_once_with("John Doe", None)
     
+    @pytest.mark.asyncio
     @patch('functions.patient_db')
-    def test_search_patient_by_name_not_found(self, mock_patient_db):
+    async def test_search_patient_by_name_not_found(self, mock_patient_db):
         """Test patient search when patient not found"""
-        mock_patient_db.find_patient_by_name_and_dob.return_value = None
-        mock_patient_db.patients.find_one.return_value = None
+        mock_patient_db.find_patient_by_name_and_dob = AsyncMock(return_value=None)
+        mock_patient_db.patients.find_one = AsyncMock(return_value=None)
         
-        result = search_patient_by_name("Jane", "Smith")
+        result = await search_patient_by_name("Jane", "Smith")
         
         assert result is None
     
+    @pytest.mark.asyncio
     @patch('functions.patient_db')
-    def test_search_patient_by_name_case_insensitive(self, mock_patient_db):
+    async def test_search_patient_by_name_case_insensitive(self, mock_patient_db):
         """Test case-insensitive patient search"""
         mock_patient = {
             "_id": "507f1f77bcf86cd799439011",
@@ -49,50 +52,54 @@ class TestPatientFunctions:
         }
         
         # First call returns None, second call (case-insensitive) returns patient
-        mock_patient_db.find_patient_by_name_and_dob.return_value = None
-        mock_patient_db.patients.find_one.return_value = mock_patient
+        mock_patient_db.find_patient_by_name_and_dob = AsyncMock(return_value=None)
+        mock_patient_db.patients.find_one = AsyncMock(return_value=mock_patient)
         
-        result = search_patient_by_name("john", "doe")
+        result = await search_patient_by_name("john", "doe")
         
         assert result is not None
         assert result["patient_name"] == "John Doe"
     
+    @pytest.mark.asyncio
     @patch('functions.patient_db')
-    def test_search_patient_by_name_exception(self, mock_patient_db):
+    async def test_search_patient_by_name_exception(self, mock_patient_db):
         """Test patient search with database exception"""
-        mock_patient_db.find_patient_by_name_and_dob.side_effect = Exception("Database error")
+        mock_patient_db.find_patient_by_name_and_dob = AsyncMock(side_effect=Exception("Database error"))
         
-        result = search_patient_by_name("John", "Doe")
+        result = await search_patient_by_name("John", "Doe")
         
         assert result is None
     
+    @pytest.mark.asyncio
     @patch('functions.patient_db')
-    def test_update_prior_auth_status_success(self, mock_patient_db):
+    async def test_update_prior_auth_status_success(self, mock_patient_db):
         """Test successful prior auth status update"""
-        mock_patient_db.update_prior_auth_status.return_value = True
+        mock_patient_db.update_prior_auth_status = AsyncMock(return_value=True)
         
-        result = update_prior_auth_status("507f1f77bcf86cd799439011", "Approved")
+        result = await update_prior_auth_status("507f1f77bcf86cd799439011", "Approved")
         
         assert result is True
         mock_patient_db.update_prior_auth_status.assert_called_once_with(
             "507f1f77bcf86cd799439011", "Approved"
         )
     
+    @pytest.mark.asyncio
     @patch('functions.patient_db')
-    def test_update_prior_auth_status_failure(self, mock_patient_db):
+    async def test_update_prior_auth_status_failure(self, mock_patient_db):
         """Test prior auth status update failure"""
-        mock_patient_db.update_prior_auth_status.return_value = False
+        mock_patient_db.update_prior_auth_status = AsyncMock(return_value=False)
         
-        result = update_prior_auth_status("507f1f77bcf86cd799439011", "Denied")
+        result = await update_prior_auth_status("507f1f77bcf86cd799439011", "Denied")
         
         assert result is False
     
+    @pytest.mark.asyncio
     @patch('functions.patient_db')
-    def test_update_prior_auth_status_exception(self, mock_patient_db):
+    async def test_update_prior_auth_status_exception(self, mock_patient_db):
         """Test prior auth status update with exception"""
-        mock_patient_db.update_prior_auth_status.side_effect = Exception("Database error")
+        mock_patient_db.update_prior_auth_status = AsyncMock(side_effect=Exception("Database error"))
         
-        result = update_prior_auth_status("507f1f77bcf86cd799439011", "Approved")
+        result = await update_prior_auth_status("507f1f77bcf86cd799439011", "Approved")
         
         assert result is False
 
@@ -136,15 +143,16 @@ class TestFunctionDefinitions:
 
 class TestIntegration:
     
+    @pytest.mark.asyncio
     @patch('functions.patient_db')
-    def test_function_registry_integration(self, mock_patient_db):
+    async def test_function_registry_integration(self, mock_patient_db):
         """Test that function registry works with actual function calls"""
-        mock_patient_db.find_patient_by_name_and_dob.return_value = {"patient_name": "Test Patient"}
-        mock_patient_db.patients.find_one.return_value = None
+        mock_patient_db.find_patient_by_name_and_dob = AsyncMock(return_value={"patient_name": "Test Patient"})
+        mock_patient_db.patients.find_one = AsyncMock(return_value=None)
         
         # Test calling function through registry
         search_func = FUNCTION_REGISTRY["search_patient_by_name"]
-        result = search_func("John", "Doe")
+        result = await search_func("John", "Doe")
         
         assert result is not None
         assert result["patient_name"] == "Test Patient"
