@@ -6,6 +6,7 @@ import datetime
 from livekit import api
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import JSONResponse
+from fastapi.middleware.cors import CORSMiddleware  # Add this import
 from pydantic import BaseModel
 from dotenv import load_dotenv
 import uvicorn
@@ -21,10 +22,19 @@ from evaluations import HealthcareEvaluator
 load_dotenv()
 
 # Configure logging
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(level=logging.DEBUG)
 logger = logging.getLogger(__name__)
 
 app = FastAPI(title="Healthcare AI Agent", version="1.0.0")
+
+# Add CORS middleware
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # In production, replace with specific origins
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 # Global instances
 patient_db = get_async_patient_db()
@@ -57,7 +67,8 @@ async def start_call(request: CallRequest = None):  # Make request optional for 
         room_name = f"healthcare-ai-session-{session_id[:8]}"  # Unique per session
         room = await lk_api.room.create_room(api.CreateRoomRequest(name=room_name))
         base_url = os.getenv("LIVEKIT_URL")
-        room_url = f"{base_url}?room={room_name}"
+        # Don't add room parameters to the URL - LiveKit client will handle this
+        room_url = base_url
 
         # Generate bot token
         bot_token = api.AccessToken(
@@ -101,6 +112,7 @@ async def start_call(request: CallRequest = None):  # Make request optional for 
             "status": "success",
             "session_id": session_id,
             "room_url": room_url,
+            "room_name": room_name,
             "user_token": user_token,
             "message": "Call started successfully. Use user_token to join the room."
         }
