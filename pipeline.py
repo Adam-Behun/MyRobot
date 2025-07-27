@@ -1,7 +1,7 @@
-from pipecat.frames.frames import LLMMessagesFrame, AudioRawFrame, Frame
+from pipecat.frames.frames import LLMMessagesFrame, AudioRawFrame, Frame, TextFrame
 from pipecat.pipeline.pipeline import Pipeline
 from pipecat.pipeline.runner import PipelineRunner
-from pipecat.pipeline.task import PipelineTask
+from pipecat.pipeline.task import PipelineTask, PipelineParams
 from pipecat.processors.frame_processor import FrameProcessor
 from pipecat.services.deepgram.stt import DeepgramSTTService
 from pipecat.services.openai.llm import OpenAILLMService
@@ -10,16 +10,33 @@ from pipecat.transports.services.livekit import LiveKitTransport, LiveKitParams
 from pipecat.audio.utils import create_stream_resampler
 from pipecat.processors.frame_processor import FrameDirection
 from pipecat.processors.aggregators.openai_llm_context import OpenAILLMContext
+# Simple OpenTelemetry setup (optional)
+try:
+    from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
+    from opentelemetry import trace
+    from opentelemetry.sdk.trace import TracerProvider
+    from opentelemetry.sdk.trace.export import BatchSpanProcessor
+    OTEL_AVAILABLE = True
+except ImportError:
+    OTEL_AVAILABLE = False
+
+# Simple Langfuse integration
+from langfuse import Langfuse
+
 import audioop
 from deepgram import LiveOptions
-import wave  # Added for audio saving
+import wave
 import os
 import sys
 import logging
 from typing import Dict, Any, List
+from dotenv import load_dotenv
+from datetime import datetime
 
-logging.basicConfig(level=logging.DEBUG)  # Set to DEBUG for detailed logging
-logging.getLogger('websockets').setLevel(logging.INFO)  # Suppress websockets debug logs
+load_dotenv()
+
+logging.basicConfig(level=logging.DEBUG)
+logging.getLogger('websockets').setLevel(logging.INFO)
 logger = logging.getLogger(__name__)
 
 class AudioResampler(FrameProcessor):
@@ -35,45 +52,38 @@ class AudioResampler(FrameProcessor):
             audio = frame.audio
             sample_rate = frame.sample_rate
             channels = frame.num_channels
-            sample_width = 2  # Assuming 16-bit audio
+            sample_width = 2
 
-            # Downmix to mono if necessary
             if channels > 1:
                 audio = audioop.tomono(audio, sample_width, 0.5, 0.5)
                 channels = 1
 
-            # Resample if sample rate does not match target
             if sample_rate != self.target_sample_rate:
                 audio = await self._resampler.resample(audio, sample_rate, self.target_sample_rate)
 
-            # Create and push the processed frame
             new_frame = AudioRawFrame(
                 audio=audio,
                 sample_rate=self.target_sample_rate,
                 num_channels=channels
             )
-            # Copy pts attribute if present on the original frame
-            if hasattr(frame, 'pts'):
-                new_frame.pts = frame.pts
-            # Copy transport_destination attribute if present on the original frame
-            if hasattr(frame, 'transport_destination'):
-                new_frame.transport_destination = frame.transport_destination
-            # Copy id attribute if present on the original frame (for observer compatibility)
-            if hasattr(frame, 'id'):
-                new_frame.id = frame.id
+            
+            # Copy attributes from original frame
+            for attr in ['pts', 'transport_destination', 'id']:
+                if hasattr(frame, attr):
+                    setattr(new_frame, attr, getattr(frame, attr))
+            
             await self.push_frame(new_frame, direction)
         else:
             await self.push_frame(frame, direction)
 
 class DropEmptyAudio(FrameProcessor):
-    """Filter to drop empty audio frames before STT processing"""
     def __init__(self, **kwargs):
-        super().__init__(**kwargs)  # Initialize parent class to set up internal attributes
+        super().__init__(**kwargs)
 
     async def process_frame(self, frame: Frame, direction: FrameDirection):
         await super().process_frame(frame, direction)
         if isinstance(frame, AudioRawFrame) and len(frame.audio) == 0:
-            return  # Skip pushing empty frames
+            return
         await self.push_frame(frame, direction)
 
 class CustomPipelineRunner(PipelineRunner):
@@ -87,11 +97,15 @@ class AudioFrameLogger(FrameProcessor):
     def __init__(self):
         super().__init__()
         self._frame_count = 0
-        self._log_interval = 100  # Log every 100th frame to reduce verbosity
-        self._audio_file = wave.open('debug_audio.wav', 'wb')  # Open WAV file for writing
-        self._audio_file.setnchannels(1)  # Mono
-        self._audio_file.setsampwidth(2)  # 16-bit
-        self._audio_file.setframerate(16000)  # 16000 Hz
+        self._log_interval = 100
+        self._audio_file = None
+        try:
+            self._audio_file = wave.open('debug_audio.wav', 'wb')
+            self._audio_file.setnchannels(1)
+            self._audio_file.setsampwidth(2)
+            self._audio_file.setframerate(16000)
+        except Exception as e:
+            logger.warning(f"Could not create audio debug file: {e}")
 
     async def process_frame(self, frame, direction):
         await super().process_frame(frame, direction)
@@ -99,13 +113,21 @@ class AudioFrameLogger(FrameProcessor):
             self._frame_count += 1
             if self._frame_count % self._log_interval == 0:
                 logger.info(f"📬 Raw audio frame received: {len(frame.audio)} bytes, sample_rate={frame.sample_rate}, channels={frame.num_channels}")
-            self._audio_file.writeframes(frame.audio)  # Save audio to file
+            if self._audio_file:
+                try:
+                    self._audio_file.writeframes(frame.audio)
+                except Exception as e:
+                    logger.warning(f"Could not write audio frame: {e}")
         else:
             logger.info(f"📬 Non-audio frame: {type(frame).__name__}")
         await self.push_frame(frame, direction)
 
     async def cleanup(self):
-        self._audio_file.close()  # Close WAV file on cleanup
+        if self._audio_file:
+            try:
+                self._audio_file.close()
+            except Exception as e:
+                logger.warning(f"Could not close audio file: {e}")
         await super().cleanup()
 
 class IntermediateFrameLogger(FrameProcessor):
@@ -116,12 +138,102 @@ class IntermediateFrameLogger(FrameProcessor):
         logger.info(f"🔍 Frame after STT: {frame_type}, text='{text}'")
         await self.push_frame(frame, direction)
 
+class LLMInputLogger(FrameProcessor):
+    async def process_frame(self, frame: Frame, direction: FrameDirection):
+        await super().process_frame(frame, direction)
+        if isinstance(frame, LLMMessagesFrame):
+            logger.info(f"🤖 LLM input messages: {frame.messages}")
+        await self.push_frame(frame, direction)
+
+class LLMOutputLogger(FrameProcessor):
+    async def process_frame(self, frame: Frame, direction: FrameDirection):
+        await super().process_frame(frame, direction)
+        frame_type = type(frame).__name__
+        text = getattr(frame, 'text', 'N/A')
+        logger.info(f"💬 LLM output frame: {frame_type}, text='{text}'")
+        await self.push_frame(frame, direction)
+
+class TTSInputLogger(FrameProcessor):
+    async def process_frame(self, frame: Frame, direction: FrameDirection):
+        await super().process_frame(frame, direction)
+        if isinstance(frame, TextFrame):
+            logger.info(f"🔊 TTS input text: '{frame.text}'")
+        await self.push_frame(frame, direction)
+
+class SimpleLangfuseLogger(FrameProcessor):
+    """Simple Langfuse logger that logs key events"""
+    def __init__(self, session_id: str):
+        super().__init__()
+        self.session_id = session_id
+        try:
+            self.langfuse = Langfuse()
+            self.trace = self.langfuse.trace(name="voice_conversation", session_id=session_id)
+            logger.info("Langfuse logging initialized")
+        except Exception as e:
+            logger.warning(f"Langfuse initialization failed: {e}")
+            self.langfuse = None
+            self.trace = None
+
+    async def process_frame(self, frame: Frame, direction: FrameDirection):
+        await super().process_frame(frame, direction)
+        
+        if self.langfuse and self.trace:
+            try:
+                if isinstance(frame, TextFrame) and hasattr(frame, 'text') and frame.text:
+                    # Log STT transcription
+                    if direction == FrameDirection.UPSTREAM:
+                        self.trace.span(
+                            name="speech_to_text",
+                            input={"audio_received": True},
+                            output={"transcription": frame.text},
+                            metadata={"timestamp": datetime.utcnow().isoformat()}
+                        )
+                        logger.info(f"📝 Logged STT to Langfuse: '{frame.text}'")
+                    # Log TTS input
+                    elif direction == FrameDirection.DOWNSTREAM:
+                        self.trace.span(
+                            name="text_to_speech",
+                            input={"text": frame.text},
+                            metadata={"timestamp": datetime.utcnow().isoformat()}
+                        )
+                        logger.info(f"🔊 Logged TTS to Langfuse: '{frame.text}'")
+                
+                elif isinstance(frame, LLMMessagesFrame):
+                    # Log LLM conversation
+                    messages = frame.messages if frame.messages else []
+                    if messages:
+                        user_message = next((msg for msg in reversed(messages) if msg.get('role') == 'user'), None)
+                        self.trace.generation(
+                            name="llm_response",
+                            input=messages,
+                            metadata={
+                                "model": "gpt-4o",
+                                "timestamp": datetime.utcnow().isoformat(),
+                                "user_message": user_message.get('content', '') if user_message else ''
+                            }
+                        )
+                        logger.info(f"🤖 Logged LLM conversation to Langfuse")
+            except Exception as e:
+                logger.warning(f"Failed to log to Langfuse: {e}")
+        
+        await self.push_frame(frame, direction)
+
 class HealthcareAIPipeline:
     def __init__(self, session_id: str = "default"):
         self.transport = None
         self.pipeline = None
         self.runner = None
         self.session_id = session_id
+        self.langfuse = None
+        self._init_langfuse()
+        
+    def _init_langfuse(self):
+        """Initialize Langfuse client"""
+        try:
+            self.langfuse = Langfuse()
+            logger.info("Langfuse client initialized")
+        except Exception as e:
+            logger.warning(f"Failed to initialize Langfuse: {e}")
         
     def create_pipeline(self, url: str, token: str, room_name: str) -> Pipeline:
         logger.info(f"Creating simple pipeline for room: {room_name}")
@@ -130,7 +242,7 @@ class HealthcareAIPipeline:
             api_key=os.getenv("LIVEKIT_API_KEY"),
             api_secret=os.getenv("LIVEKIT_API_SECRET"),
             audio_in_enabled=True,
-            vad_enabled=True  # Enable LiveKit VAD for better speech detection
+            vad_enabled=True
         )
         
         self.transport = LiveKitTransport(url, token, room_name, params=params)
@@ -138,53 +250,22 @@ class HealthcareAIPipeline:
         stt = DeepgramSTTService(
             api_key=os.getenv("DEEPGRAM_API_KEY"),
             live_options=LiveOptions(
-                model="nova-2",  # Explicitly set real-time model
+                model="nova-2",
                 language="en-US",
                 encoding="linear16",
                 sample_rate=16000,
                 channels=1,
-                interim_results=True,  # Enable partial transcripts
-                endpointing=100,  # Lower to 100ms for faster detection
-                vad_events=True,  # Enable Deepgram VAD to handle speech boundaries reliably
+                interim_results=True,
+                endpointing=100,
+                vad_events=True,
                 smart_format=True,
                 punctuate=True,
-                profanity_filter=False  # Disable for broader transcription capture
+                profanity_filter=False
             )
         )
         
-        # Wrap STT to see what it receives
-        original_stt_process = stt.process_frame
-        async def logged_stt_process(frame, direction):
-            frame_type = type(frame).__name__
-            if hasattr(frame, 'audio') and frame.audio:
-                pass  # Removed debug logging for audio frames
-            elif hasattr(frame, 'text') and frame.text:
-                logger.info(f"📝 STT transcribed: '{frame.text}'")
-            else:
-                logger.info(f"📥 STT got frame: {frame_type}")
-            result = await original_stt_process(frame, direction)
-            return result
-        stt.process_frame = logged_stt_process
-        
-        # Enhanced logging for Deepgram WebSocket messages with flexible signature
-        original_on_message = stt._on_message
-        async def logged_on_message(self, *args, **kwargs):
-            # Extract result from args or kwargs
-            result = None
-            if args:
-                result = args[0]
-            if 'result' in kwargs:
-                result = kwargs['result']
-            if result is not None:
-                logger.debug(f"Deepgram WebSocket message (full): {result}")
-            # Invoke original, avoiding duplicate 'result' if present
-            if 'result' in kwargs and args and kwargs['result'] == args[0]:
-                kwargs.pop('result')
-            await original_on_message(self, *args, **kwargs)
-        stt._on_message = logged_on_message.__get__(stt, DeepgramSTTService)
-        
         initial_messages = [
-            {"role": "system", "content": "You are a helpful healthcare AI assistant. Keep responses brief and clear. Always acknowledge what the user said."}
+            {"role": "system", "content": "You are a helpful AI assistant. Keep responses brief and clear. Always acknowledge what the user said."}
         ]
         
         llm = OpenAILLMService(
@@ -192,51 +273,57 @@ class HealthcareAIPipeline:
             model="gpt-4o"
         )
         
-        # Create LLM context and aggregators for managing conversation history
         llm_context = OpenAILLMContext(messages=initial_messages)
         context_aggregators = llm.create_context_aggregator(llm_context)
         
-        original_llm_process = llm.process_frame
-        async def logged_llm_process(frame, direction):
-            if hasattr(frame, 'text') and frame.text:
-                logger.info(f"🤖 LLM got text: '{frame.text}'")
-            try:
-                result = await original_llm_process(frame, direction)
-                if hasattr(result, 'text') and result.text:
-                    logger.info(f"💬 LLM replied: '{result.text}'")
-                return result
-            except Exception as e:
-                logger.error(f"LLM processing error: {str(e)}")
-                raise  # Or handle as needed
-        llm.process_frame = logged_llm_process
+        # Create TTS service with intelligent fallback strategy
+        tts_service = None
         
-        # Temporarily bypass Cartesia TTS for testing
-        # tts = CartesiaTTSService(
-        #     api_key=os.getenv("CARTESIA_API_KEY"),
-        #     voice_id="a0e99841-438c-4a64-b679-ae501e7d6091",
-        #     model_id="sonic-english"
-        # )
-        # original_tts_process = tts.process_frame
-        # async def logged_tts_process(frame, direction):
-        #     if hasattr(frame, 'text') and frame.text:
-        #         logger.info(f"🔊 TTS got text: '{frame.text}'")
-        #     result = await original_tts_process(frame, direction)
-        #     if hasattr(result, 'audio') and result.audio:
-        #         logger.info(f"🎤 TTS created audio: {len(result.audio)} bytes")
-        #     return result
-        # tts.process_frame = logged_tts_process
+        # Try Cartesia first (if you prefer it)
+        if os.getenv("CARTESIA_API_KEY") and os.getenv("USE_CARTESIA", "false").lower() == "true":
+            try:
+                from pipecat.services.cartesia.tts import CartesiaTTSService
+                tts_service = CartesiaTTSService(
+                    api_key=os.getenv("CARTESIA_API_KEY"),
+                    voice_id="a0e99841-438c-4a64-b679-ae501e7d6091",
+                    model="sonic-2",  # Use latest model name
+                    cartesia_version="2025-04-16"  # Use latest API version
+                )
+                logger.info("✅ Cartesia TTS service initialized successfully")
+            except Exception as e:
+                logger.warning(f"⚠️ Cartesia TTS failed to initialize: {e}")
+                tts_service = None
+        
+        # Fallback to OpenAI TTS (more reliable)
+        if not tts_service:
+            try:
+                from pipecat.services.openai.tts import OpenAITTSService
+                tts_service = OpenAITTSService(
+                    api_key=os.getenv("OPENAI_API_KEY"),
+                    voice="alloy"  # or "echo", "fable", "onyx", "nova", "shimmer"
+                )
+                logger.info("✅ OpenAI TTS service initialized successfully (fallback)")
+            except Exception as e:
+                logger.error(f"❌ Failed to initialize any TTS service: {e}")
+                raise RuntimeError("No TTS service available")
+        
+        tts = tts_service
         
         self.pipeline = Pipeline([
             self.transport.input(),
-            AudioResampler(),  # Add resampling here to ensure correct format for downstream processors
+            AudioResampler(),
             AudioFrameLogger(),
-            DropEmptyAudio(),  # Add filter to drop empty frames before STT
+            DropEmptyAudio(),
             stt,
-            IntermediateFrameLogger(),  # Insert here to monitor output from STT
-            context_aggregators.user(),  # Aggregates user messages from STT into LLM context
+            IntermediateFrameLogger(),
+            SimpleLangfuseLogger(self.session_id),  # Simple Langfuse logging
+            context_aggregators.user(),
+            LLMInputLogger(),
             llm,
-            # tts,  # Commented out to bypass TTS
-            context_aggregators.assistant(),  # Aggregates assistant responses back into LLM context
+            LLMOutputLogger(),
+            TTSInputLogger(),
+            tts,
+            context_aggregators.assistant(),
             self.transport.output()
         ])
         
@@ -252,14 +339,74 @@ class HealthcareAIPipeline:
         }
     
     def get_optimization_suggestions(self) -> List[str]:
-        return ["Simple pipeline active"]
+        return ["Simple pipeline active with basic Langfuse logging"]
     
     async def run(self, url: str, token: str, room_name: str):
         if not self.pipeline:
             self.create_pipeline(url, token, room_name)
         
-        task = PipelineTask(self.pipeline)
+        # Set up basic OpenTelemetry tracing if available and enabled
+        if os.getenv("ENABLE_TRACING", "").lower() == "true" and OTEL_AVAILABLE:
+            try:
+                tracer_provider = TracerProvider()
+                trace.set_tracer_provider(tracer_provider)
+                
+                exporter = OTLPSpanExporter(
+                    endpoint=os.getenv("OTEL_EXPORTER_OTLP_ENDPOINT"),
+                    headers=dict(
+                        item.split("=", 1) for item in 
+                        os.getenv("OTEL_EXPORTER_OTLP_HEADERS", "").split(",") if item
+                    )
+                )
+                tracer_provider.add_span_processor(BatchSpanProcessor(exporter))
+                logger.info("OpenTelemetry tracing enabled")
+            except Exception as e:
+                logger.warning(f"Failed to setup OpenTelemetry: {e}")
+        
+        task = PipelineTask(
+            self.pipeline,
+            params=PipelineParams(
+                allow_interruptions=True,
+                enable_metrics=True,
+            ),
+            enable_tracing=False,  # Disable pipecat's built-in tracing since the module doesn't exist
+            conversation_id=self.session_id
+        )
+        
         self.runner = CustomPipelineRunner()
         
+        # Log session start to Langfuse
+        if self.langfuse:
+            try:
+                self.langfuse.trace(
+                    name="session_start",
+                    session_id=self.session_id,
+                    metadata={"room_name": room_name, "timestamp": datetime.utcnow().isoformat()}
+                )
+            except Exception as e:
+                logger.warning(f"Failed to log session start: {e}")
+        
         logger.info(f"Starting simple pipeline for session: {self.session_id}")
-        await self.runner.run(task)
+        
+        try:
+            await self.runner.run(task)
+        except Exception as e:
+            logger.error(f"Pipeline error: {e}")
+            # Log error to Langfuse
+            if self.langfuse:
+                try:
+                    self.langfuse.trace(
+                        name="session_error",
+                        session_id=self.session_id,
+                        metadata={"error": str(e), "timestamp": datetime.utcnow().isoformat()}
+                    )
+                except Exception:
+                    pass
+            raise
+        finally:
+            # Flush Langfuse logs
+            if self.langfuse:
+                try:
+                    self.langfuse.flush()
+                except Exception:
+                    pass
