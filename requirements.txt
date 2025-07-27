@@ -1,4 +1,4 @@
-pipecat-ai[livekit,silero]
+pipecat-ai[livekit,silero]==0.0.76
 openai>=1.3.0
 deepgram-sdk>=3.2.0
 cartesia>=1.0.0
