@@ -1,4 +1,4 @@
-from pipecat.frames.frames import LLMMessagesFrame, AudioRawFrame, Frame, TextFrame
+from pipecat.frames.frames import LLMMessagesFrame, AudioRawFrame, Frame, TextFrame, TTSAudioRawFrame
 from pipecat.pipeline.pipeline import Pipeline
 from pipecat.pipeline.runner import PipelineRunner
 from pipecat.pipeline.task import PipelineTask, PipelineParams
@@ -10,6 +10,7 @@ from pipecat.transports.services.livekit import LiveKitTransport, LiveKitParams
 from pipecat.audio.utils import create_stream_resampler
 from pipecat.processors.frame_processor import FrameDirection
 from pipecat.processors.aggregators.openai_llm_context import OpenAILLMContext
+
 # Simple OpenTelemetry setup (optional)
 try:
     from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
@@ -160,6 +161,51 @@ class TTSInputLogger(FrameProcessor):
             logger.info(f"🔊 TTS input text: '{frame.text}'")
         await self.push_frame(frame, direction)
 
+class AudioOutputLogger(FrameProcessor):
+    """Logger to track audio output frames and debug audio routing"""
+    def __init__(self):
+        super().__init__()
+        self._audio_frame_count = 0
+        
+    async def process_frame(self, frame: Frame, direction: FrameDirection):
+        await super().process_frame(frame, direction)
+        
+        if isinstance(frame, TTSAudioRawFrame):
+            self._audio_frame_count += 1
+            logger.info(f"🔊 AUDIO OUTPUT: Frame #{self._audio_frame_count}, {len(frame.audio)} bytes, {frame.sample_rate}Hz, {frame.num_channels} channels")
+            
+            # Log first few audio frames in detail
+            if self._audio_frame_count <= 3:
+                logger.info(f"🎵 Audio data preview: {frame.audio[:20]}...")
+                
+        elif hasattr(frame, 'audio') and frame.audio:
+            logger.info(f"🎵 Other audio frame: {type(frame).__name__}, {len(frame.audio)} bytes")
+        else:
+            logger.debug(f"📤 Non-audio output frame: {type(frame).__name__}")
+            
+        await self.push_frame(frame, direction)
+
+class TransportOutputLogger(FrameProcessor):
+    """Logger to track what's being sent to the transport output"""
+    def __init__(self):
+        super().__init__()
+        self._output_frame_count = 0
+        
+    async def process_frame(self, frame: Frame, direction: FrameDirection):
+        await super().process_frame(frame, direction)
+        
+        self._output_frame_count += 1
+        frame_type = type(frame).__name__
+        
+        if isinstance(frame, TTSAudioRawFrame):
+            logger.info(f"🚀 TRANSPORT OUTPUT #{self._output_frame_count}: {frame_type} - {len(frame.audio)} bytes, {frame.sample_rate}Hz")
+        elif hasattr(frame, 'audio'):
+            logger.info(f"🚀 TRANSPORT OUTPUT #{self._output_frame_count}: {frame_type} - {len(frame.audio)} bytes")
+        else:
+            logger.info(f"🚀 TRANSPORT OUTPUT #{self._output_frame_count}: {frame_type}")
+            
+        await self.push_frame(frame, direction)
+
 class SimpleLangfuseLogger(FrameProcessor):
     """Simple Langfuse logger that logs key events"""
     def __init__(self, session_id: str):
@@ -167,50 +213,44 @@ class SimpleLangfuseLogger(FrameProcessor):
         self.session_id = session_id
         try:
             self.langfuse = Langfuse()
-            self.trace = self.langfuse.trace(name="voice_conversation", session_id=session_id)
             logger.info("Langfuse logging initialized")
         except Exception as e:
             logger.warning(f"Langfuse initialization failed: {e}")
             self.langfuse = None
-            self.trace = None
 
     async def process_frame(self, frame: Frame, direction: FrameDirection):
         await super().process_frame(frame, direction)
         
-        if self.langfuse and self.trace:
+        if self.langfuse:
             try:
                 if isinstance(frame, TextFrame) and hasattr(frame, 'text') and frame.text:
-                    # Log STT transcription
+                    # Log STT transcription or TTS input
+                    event_data = {
+                        "session_id": self.session_id,
+                        "text": frame.text,
+                        "frame_type": type(frame).__name__,
+                        "direction": str(direction),
+                        "timestamp": datetime.utcnow().isoformat()
+                    }
+                    
                     if direction == FrameDirection.UPSTREAM:
-                        self.trace.span(
-                            name="speech_to_text",
-                            input={"audio_received": True},
-                            output={"transcription": frame.text},
-                            metadata={"timestamp": datetime.utcnow().isoformat()}
-                        )
+                        # This is speech-to-text
+                        self.langfuse.event(name="speech_to_text", **event_data)
                         logger.info(f"📝 Logged STT to Langfuse: '{frame.text}'")
-                    # Log TTS input
                     elif direction == FrameDirection.DOWNSTREAM:
-                        self.trace.span(
-                            name="text_to_speech",
-                            input={"text": frame.text},
-                            metadata={"timestamp": datetime.utcnow().isoformat()}
-                        )
+                        # This is text going to TTS
+                        self.langfuse.event(name="text_to_speech", **event_data)
                         logger.info(f"🔊 Logged TTS to Langfuse: '{frame.text}'")
                 
                 elif isinstance(frame, LLMMessagesFrame):
                     # Log LLM conversation
                     messages = frame.messages if frame.messages else []
                     if messages:
-                        user_message = next((msg for msg in reversed(messages) if msg.get('role') == 'user'), None)
-                        self.trace.generation(
-                            name="llm_response",
-                            input=messages,
-                            metadata={
-                                "model": "gpt-4o",
-                                "timestamp": datetime.utcnow().isoformat(),
-                                "user_message": user_message.get('content', '') if user_message else ''
-                            }
+                        self.langfuse.event(
+                            name="llm_conversation",
+                            session_id=self.session_id,
+                            messages=messages,
+                            timestamp=datetime.utcnow().isoformat()
                         )
                         logger.info(f"🤖 Logged LLM conversation to Langfuse")
             except Exception as e:
@@ -233,7 +273,8 @@ class HealthcareAIPipeline:
             self.langfuse = Langfuse()
             logger.info("Langfuse client initialized")
         except Exception as e:
-            logger.warning(f"Failed to initialize Langfuse: {e}")
+            logger.warning(f"Langfuse initialization failed: {e}")
+            self.langfuse = None
         
     def create_pipeline(self, url: str, token: str, room_name: str) -> Pipeline:
         logger.info(f"Creating simple pipeline for room: {room_name}")
@@ -242,6 +283,7 @@ class HealthcareAIPipeline:
             api_key=os.getenv("LIVEKIT_API_KEY"),
             api_secret=os.getenv("LIVEKIT_API_SECRET"),
             audio_in_enabled=True,
+            audio_out_enabled=True,  # Explicitly enable audio output
             vad_enabled=True
         )
         
@@ -316,14 +358,16 @@ class HealthcareAIPipeline:
             DropEmptyAudio(),
             stt,
             IntermediateFrameLogger(),
-            SimpleLangfuseLogger(self.session_id),  # Simple Langfuse logging
+            SimpleLangfuseLogger(self.session_id),
             context_aggregators.user(),
             LLMInputLogger(),
             llm,
             LLMOutputLogger(),
             TTSInputLogger(),
             tts,
+            AudioOutputLogger(),  # Track TTS audio output
             context_aggregators.assistant(),
+            TransportOutputLogger(),  # Track what goes to transport
             self.transport.output()
         ])
         
@@ -378,7 +422,7 @@ class HealthcareAIPipeline:
         # Log session start to Langfuse
         if self.langfuse:
             try:
-                self.langfuse.trace(
+                self.langfuse.event(
                     name="session_start",
                     session_id=self.session_id,
                     metadata={"room_name": room_name, "timestamp": datetime.utcnow().isoformat()}
@@ -395,7 +439,7 @@ class HealthcareAIPipeline:
             # Log error to Langfuse
             if self.langfuse:
                 try:
-                    self.langfuse.trace(
+                    self.langfuse.event(
                         name="session_error",
                         session_id=self.session_id,
                         metadata={"error": str(e), "timestamp": datetime.utcnow().isoformat()}
