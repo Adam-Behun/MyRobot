@@ -206,67 +206,7 @@ class TransportOutputLogger(FrameProcessor):
             
         await self.push_frame(frame, direction)
 
-class ConversationTracker(FrameProcessor):
-    """Track conversation flow and manage simple states"""
-    def __init__(self, session_id: str):
-        super().__init__()
-        self.session_id = session_id
-        self.conversation_step = "greeting"
-        self.user_inputs = []
-        self.ai_responses = []
-        
-    async def process_frame(self, frame: Frame, direction: FrameDirection):
-        await super().process_frame(frame, direction)
-        
-        # Track user inputs (STT output)
-        if isinstance(frame, TextFrame) and direction == FrameDirection.UPSTREAM:
-            self.user_inputs.append(frame.text)
-            logger.info(f"📞 USER SAID: '{frame.text}' | Current step: {self.conversation_step}")
-            
-            # Simple step progression based on conversation
-            self._update_conversation_step(frame.text)
-            
-        # Track AI responses (going to TTS)
-        elif isinstance(frame, TextFrame) and direction == FrameDirection.DOWNSTREAM:
-            self.ai_responses.append(frame.text)
-            logger.info(f"🤖 AI RESPONDING: '{frame.text}' | Step: {self.conversation_step}")
-        
-        await self.push_frame(frame, direction)
-    
-    def _update_conversation_step(self, user_input: str):
-        """Simple conversation step tracking"""
-        user_lower = user_input.lower()
-        
-        if self.conversation_step == "greeting":
-            if any(word in user_lower for word in ["hello", "hi", "yes", "speaking"]):
-                self.conversation_step = "department_transfer"
-                logger.info("🔄 Step: greeting → department_transfer")
-                
-        elif self.conversation_step == "department_transfer":
-            if any(word in user_lower for word in ["prior auth", "authorization", "connected", "department"]):
-                self.conversation_step = "patient_info"
-                logger.info("🔄 Step: department_transfer → patient_info")
-                
-        elif self.conversation_step == "patient_info":
-            if any(word in user_lower for word in ["name", "patient", "member"]):
-                self.conversation_step = "procedure_info"
-                logger.info("🔄 Step: patient_info → procedure_info")
-                
-        elif self.conversation_step == "procedure_info":
-            if any(word in user_lower for word in ["procedure", "surgery", "treatment", "service"]):
-                self.conversation_step = "authorization_request"
-                logger.info("🔄 Step: procedure_info → authorization_request")
-    
-    def get_conversation_summary(self):
-        """Get summary of conversation so far"""
-        return {
-            "session_id": self.session_id,
-            "current_step": self.conversation_step,
-            "user_inputs_count": len(self.user_inputs),
-            "ai_responses_count": len(self.ai_responses),
-            "last_user_input": self.user_inputs[-1] if self.user_inputs else None,
-            "last_ai_response": self.ai_responses[-1] if self.ai_responses else None
-        }
+class SimpleLangfuseLogger(FrameProcessor):
     """Simple Langfuse logger that logs key events"""
     def __init__(self, session_id: str):
         super().__init__()
@@ -343,10 +283,8 @@ class HealthcareAIPipeline:
             api_key=os.getenv("LIVEKIT_API_KEY"),
             api_secret=os.getenv("LIVEKIT_API_SECRET"),
             audio_in_enabled=True,
-            audio_out_enabled=True,
-            vad_enabled=True,
-            audio_out_sample_rate=16000,  # Match input sample rate
-            audio_in_sample_rate=16000   # Ensure consistent sample rate
+            audio_out_enabled=True,  # Explicitly enable audio output
+            vad_enabled=True
         )
         
         self.transport = LiveKitTransport(url, token, room_name, params=params)
@@ -368,38 +306,14 @@ class HealthcareAIPipeline:
             )
         )
         
-        # Simple outbound prior auth workflow - step by step
-        if os.getenv("USE_HEALTHCARE_WORKFLOW", "false").lower() == "true":
-            initial_messages = [
-                {
-                    "role": "system", 
-                    "content": """You are MyRobot, an AI calling on behalf of a healthcare provider to verify patient coverage and obtain prior authorization.
-
-CURRENT STEP: Initial greeting and introduction
-- You are calling an insurance company 
-- Introduce yourself professionally
-- State you're calling about prior authorization for a patient
-- Ask to speak with the prior authorization department
-
-Keep responses brief for phone conversation. Be polite and professional.
-
-Example: "Hello, this is MyRobot calling on behalf of [Provider Name]. I'm calling to request prior authorization for a patient. Could you please connect me with your prior authorization department?"
-"""
-                }
-            ]
-            logger.info("🏥 Configured as OUTBOUND prior authorization caller")
-        else:
-            initial_messages = [
-                {"role": "system", "content": "You are a helpful AI assistant. Keep responses brief and clear."}
-            ]
-            logger.info("💬 Configured as basic conversation assistant")
+        initial_messages = [
+            {"role": "system", "content": "You are a helpful AI assistant. Keep responses brief and clear. Always acknowledge what the user said."}
+        ]
         
-        # Simple LLM setup - no functions for now
         llm = OpenAILLMService(
             api_key=os.getenv("OPENAI_API_KEY"),
             model="gpt-4o"
         )
-        logger.info("🤖 LLM configured for basic conversation (no functions yet)")
         
         llm_context = OpenAILLMContext(messages=initial_messages)
         context_aggregators = llm.create_context_aggregator(llm_context)
@@ -437,10 +351,6 @@ Example: "Hello, this is MyRobot calling on behalf of [Provider Name]. I'm calli
         
         tts = tts_service
         
-        # Simple workflow state tracking
-        self.conversation_step = "greeting"
-        logger.info(f"🔄 Pipeline initialized at step: {self.conversation_step}")
-        
         self.pipeline = Pipeline([
             self.transport.input(),
             AudioResampler(),
@@ -448,7 +358,6 @@ Example: "Hello, this is MyRobot calling on behalf of [Provider Name]. I'm calli
             DropEmptyAudio(),
             stt,
             IntermediateFrameLogger(),
-            ConversationTracker(self.session_id),  # Track conversation flow
             SimpleLangfuseLogger(self.session_id),
             context_aggregators.user(),
             LLMInputLogger(),
@@ -456,13 +365,13 @@ Example: "Hello, this is MyRobot calling on behalf of [Provider Name]. I'm calli
             LLMOutputLogger(),
             TTSInputLogger(),
             tts,
-            AudioOutputLogger(),
+            AudioOutputLogger(),  # Track TTS audio output
             context_aggregators.assistant(),
-            TransportOutputLogger(),
+            TransportOutputLogger(),  # Track what goes to transport
             self.transport.output()
         ])
         
-        logger.info("📞 Outbound prior authorization pipeline created successfully")
+        logger.info("Simple pipeline created successfully")
         return self.pipeline
     
     def get_conversation_state(self) -> Dict[str, Any]:
