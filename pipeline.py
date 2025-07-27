@@ -9,6 +9,7 @@ from pipecat.services.cartesia.tts import CartesiaTTSService
 from pipecat.transports.services.livekit import LiveKitTransport, LiveKitParams
 from pipecat.audio.utils import create_stream_resampler
 from pipecat.processors.frame_processor import FrameDirection
+from pipecat.processors.aggregators.openai_llm_context import OpenAILLMContext
 import audioop
 from deepgram import LiveOptions
 import wave  # Added for audio saving
@@ -107,6 +108,14 @@ class AudioFrameLogger(FrameProcessor):
         self._audio_file.close()  # Close WAV file on cleanup
         await super().cleanup()
 
+class IntermediateFrameLogger(FrameProcessor):
+    async def process_frame(self, frame: Frame, direction: FrameDirection):
+        await super().process_frame(frame, direction)
+        frame_type = type(frame).__name__
+        text = getattr(frame, 'text', 'N/A')
+        logger.info(f"🔍 Frame after STT: {frame_type}, text='{text}'")
+        await self.push_frame(frame, direction)
+
 class HealthcareAIPipeline:
     def __init__(self, session_id: str = "default"):
         self.transport = None
@@ -157,12 +166,22 @@ class HealthcareAIPipeline:
             return result
         stt.process_frame = logged_stt_process
         
-        # Enhanced logging for Deepgram WebSocket messages with corrected signature
+        # Enhanced logging for Deepgram WebSocket messages with flexible signature
         original_on_message = stt._on_message
-        async def logged_on_message(client, result, **kwargs):
-            logger.debug(f"Deepgram WebSocket message (full): {result}")
-            await original_on_message(result, **kwargs)
-        stt._on_message = logged_on_message
+        async def logged_on_message(self, *args, **kwargs):
+            # Extract result from args or kwargs
+            result = None
+            if args:
+                result = args[0]
+            if 'result' in kwargs:
+                result = kwargs['result']
+            if result is not None:
+                logger.debug(f"Deepgram WebSocket message (full): {result}")
+            # Invoke original, avoiding duplicate 'result' if present
+            if 'result' in kwargs and args and kwargs['result'] == args[0]:
+                kwargs.pop('result')
+            await original_on_message(self, *args, **kwargs)
+        stt._on_message = logged_on_message.__get__(stt, DeepgramSTTService)
         
         initial_messages = [
             {"role": "system", "content": "You are a helpful healthcare AI assistant. Keep responses brief and clear. Always acknowledge what the user said."}
@@ -170,18 +189,25 @@ class HealthcareAIPipeline:
         
         llm = OpenAILLMService(
             api_key=os.getenv("OPENAI_API_KEY"),
-            model="gpt-4o",
-            messages=initial_messages
+            model="gpt-4o"
         )
+        
+        # Create LLM context and aggregators for managing conversation history
+        llm_context = OpenAILLMContext(messages=initial_messages)
+        context_aggregators = llm.create_context_aggregator(llm_context)
         
         original_llm_process = llm.process_frame
         async def logged_llm_process(frame, direction):
             if hasattr(frame, 'text') and frame.text:
                 logger.info(f"🤖 LLM got text: '{frame.text}'")
-            result = await original_llm_process(frame, direction)
-            if hasattr(result, 'text') and result.text:
-                logger.info(f"💬 LLM replied: '{result.text}'")
-            return result
+            try:
+                result = await original_llm_process(frame, direction)
+                if hasattr(result, 'text') and result.text:
+                    logger.info(f"💬 LLM replied: '{result.text}'")
+                return result
+            except Exception as e:
+                logger.error(f"LLM processing error: {str(e)}")
+                raise  # Or handle as needed
         llm.process_frame = logged_llm_process
         
         # Temporarily bypass Cartesia TTS for testing
@@ -201,15 +227,18 @@ class HealthcareAIPipeline:
         # tts.process_frame = logged_tts_process
         
         self.pipeline = Pipeline([
-        self.transport.input(),
-        AudioResampler(),  # Add resampling here to ensure correct format for downstream processors
-        AudioFrameLogger(),
-        DropEmptyAudio(),  # Add filter to drop empty frames before STT
-        stt,
-        llm,
-        # tts,  # Commented out to bypass TTS
-        self.transport.output()
-    ])
+            self.transport.input(),
+            AudioResampler(),  # Add resampling here to ensure correct format for downstream processors
+            AudioFrameLogger(),
+            DropEmptyAudio(),  # Add filter to drop empty frames before STT
+            stt,
+            IntermediateFrameLogger(),  # Insert here to monitor output from STT
+            context_aggregators.user(),  # Aggregates user messages from STT into LLM context
+            llm,
+            # tts,  # Commented out to bypass TTS
+            context_aggregators.assistant(),  # Aggregates assistant responses back into LLM context
+            self.transport.output()
+        ])
         
         logger.info("Simple pipeline created successfully")
         return self.pipeline
