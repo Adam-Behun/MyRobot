@@ -30,9 +30,10 @@ import wave
 import os
 import sys
 import logging
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Optional
 from dotenv import load_dotenv
 from datetime import datetime
+from enum import Enum
 
 load_dotenv()
 
@@ -40,6 +41,133 @@ logging.basicConfig(level=logging.DEBUG)
 logging.getLogger('websockets').setLevel(logging.INFO)
 logger = logging.getLogger(__name__)
 
+# Workflow State Management
+class ConversationState(Enum):
+    """Insurance verification call workflow states"""
+    INITIAL_RESPONSE = "initial_response"
+    PATIENT_INFO_REQUEST = "patient_info_request"
+    ELIGIBILITY_VERIFICATION = "eligibility_verification"
+    BENEFITS_INQUIRY = "benefits_inquiry"
+    COMPLETION = "completion"
+
+class HealthcareWorkflow:
+    """Simple workflow manager for prior authorization conversations"""
+    
+    def __init__(self, patient_id: str = None):
+        self.state = ConversationState.INITIAL_RESPONSE
+        self.patient_id = patient_id  # Store patient ID for function calls
+        self.patient_data = None
+        self.collected_info = {}
+        
+    def get_system_prompt(self) -> str:
+        """Get system prompt based on current conversation state"""
+        
+        base_prompt = """You are MyRobot, a healthcare AI assistant for prior authorization calls. 
+                         You are professional, empathetic, and HIPAA-compliant. Keep responses concise for voice interaction."""
+        
+        state_prompts = {
+            ConversationState.GREETING: """
+Current task: You have just called about a prior authorization request. Start the conversation professionally.
+Say something like: "Hello, I'm MyRobot calling about a prior authorization request. May I have the patient's full name please?"
+Be direct and professional - you are the one calling them.
+""",
+            
+            ConversationState.PATIENT_VERIFICATION: """
+Current task: You have the patient's name. Acknowledge it and ask for verification details.
+Ask for date of birth or other identifying information to verify this is the correct patient.
+Example: "Thank you. Can you please confirm the patient's date of birth for verification?"
+""",
+            
+            ConversationState.PROCEDURE_COLLECTION: """
+Current task: Patient is verified. Now collect information about the medical procedure requiring authorization.
+Ask about: specific procedure, medical necessity, symptoms, and when it's needed.
+Keep questions natural and conversational. Example: "Great, now can you tell me what procedure needs authorization?"
+""",
+            
+            ConversationState.AUTHORIZATION_DECISION: """
+Current task: You have the procedure information. Make an authorization decision.
+Provide a clear decision (approved/denied/needs more info) and explain next steps.
+Example: "Based on the information provided, I can approve this authorization. Your reference number is..."
+""",
+            
+            ConversationState.COMPLETION: """
+Current task: Wrap up the call professionally.
+Provide any reference numbers, confirm next steps, and thank them.
+Example: "Is there anything else I can help you with regarding this authorization? Thank you for your time."
+"""
+        }
+        
+        return base_prompt + state_prompts.get(self.state, "")
+    
+    def advance_state(self, trigger: str = None) -> ConversationState:
+        """Advance to next conversation state based on trigger"""
+        
+        state_transitions = {
+            ConversationState.GREETING: ConversationState.PATIENT_VERIFICATION,
+            ConversationState.PATIENT_VERIFICATION: ConversationState.PROCEDURE_COLLECTION,
+            ConversationState.PROCEDURE_COLLECTION: ConversationState.AUTHORIZATION_DECISION,
+            ConversationState.AUTHORIZATION_DECISION: ConversationState.COMPLETION,
+            ConversationState.COMPLETION: ConversationState.COMPLETION  # Stay at completion
+        }
+        
+        previous_state = self.state
+        self.state = state_transitions.get(self.state, self.state)
+        
+        logger.info(f"Workflow state: {previous_state.value} -> {self.state.value}")
+        return self.state
+    
+    def update_patient_data(self, patient_data: Dict[str, Any]):
+        """Update stored patient data"""
+        self.patient_data = patient_data
+        logger.info(f"Updated patient data for: {patient_data.get('patient_name', 'Unknown')}")
+    
+    def add_collected_info(self, key: str, value: Any):
+        """Add collected information to workflow state"""
+        self.collected_info[key] = value
+        logger.info(f"Added to workflow: {key} = {value}")
+    
+    def get_workflow_context(self) -> Dict[str, Any]:
+        """Get current workflow context for LLM"""
+        return {
+            "current_state": self.state.value,
+            "patient_data": self.patient_data,
+            "collected_info": self.collected_info,
+            "next_action": self._get_next_action()
+        }
+    
+    def _get_next_action(self) -> str:
+        """Get description of what should happen next"""
+        actions = {
+            ConversationState.INITIAL_RESPONSE: "Introduce yourself and state purpose",
+            ConversationState.PATIENT_INFO_REQUEST: "Provide patient information when requested",
+            ConversationState.ELIGIBILITY_VERIFICATION: "Verify patient eligibility status",
+            ConversationState.BENEFITS_INQUIRY: "Inquire about specific benefits and coverage",
+            ConversationState.COMPLETION: "End call professionally"
+        }
+        return actions.get(self.state, "Continue conversation")
+    
+    def should_use_function(self, user_message: str) -> Optional[str]:
+        """Determine if a function should be called based on conversation state and user input"""
+        
+        # Simple keyword-based function triggering
+        if self.state == ConversationState.PATIENT_VERIFICATION:
+            if any(word in user_message.lower() for word in ["name is", "patient is", "my name"]):
+                return "search_patient_by_name"
+        
+        if self.state == ConversationState.AUTHORIZATION_DECISION:
+            if self.patient_data and "collected_info" in str(self.collected_info):
+                return "update_prior_auth_status"
+        
+        return None
+    
+    def reset(self):
+        """Reset workflow to initial state"""
+        self.state = ConversationState.GREETING
+        self.patient_data = None
+        self.collected_info = {}
+        logger.info("Workflow reset to initial state")
+
+# Frame Processors (keeping all existing ones)
 class AudioResampler(FrameProcessor):
     def __init__(self, target_sample_rate: int = 16000, target_channels: int = 1, **kwargs):
         super().__init__(**kwargs)
@@ -143,7 +271,11 @@ class LLMInputLogger(FrameProcessor):
     async def process_frame(self, frame: Frame, direction: FrameDirection):
         await super().process_frame(frame, direction)
         if isinstance(frame, LLMMessagesFrame):
-            logger.info(f"🤖 LLM input messages: {frame.messages}")
+            logger.info(f"🤖 LLM input messages ({len(frame.messages)} total):")
+            for i, msg in enumerate(frame.messages):
+                role = msg.get('role', 'unknown')
+                content = msg.get('content', '')[:200] + "..." if len(msg.get('content', '')) > 200 else msg.get('content', '')
+                logger.info(f"   [{i}] {role}: {content}")
         await self.push_frame(frame, direction)
 
 class LLMOutputLogger(FrameProcessor):
@@ -206,7 +338,43 @@ class TransportOutputLogger(FrameProcessor):
             
         await self.push_frame(frame, direction)
 
-class SimpleLangfuseLogger(FrameProcessor):
+class FunctionCallHandler(FrameProcessor):
+    """Processor that handles function calls from the LLM"""
+    def __init__(self, patient_id: str = None):
+        super().__init__()
+        self.patient_id = patient_id
+
+    async def process_frame(self, frame: Frame, direction: FrameDirection):
+        await super().process_frame(frame, direction)
+        
+        # Handle function calls from LLM
+        if hasattr(frame, 'function_calls') and frame.function_calls:
+            logger.info(f"🔧 Processing function calls: {frame.function_calls}")
+            
+            for function_call in frame.function_calls:
+                function_name = function_call.get('name')
+                function_args = function_call.get('arguments', {})
+                
+                # Auto-inject patient_id if function needs it and it's not provided
+                if function_name in ['get_facility_name', 'get_patient_demographics', 'get_patient_insurance_info', 'get_patient_medical_info', 'get_provider_info']:
+                    if 'patient_id' not in function_args and self.patient_id:
+                        function_args['patient_id'] = self.patient_id
+                        logger.info(f"Auto-injected patient_id: {self.patient_id}")
+                
+                if function_name in FUNCTION_REGISTRY:
+                    try:
+                        # Call the function
+                        result = await FUNCTION_REGISTRY[function_name](**function_args)
+                        logger.info(f"✅ Function {function_name} returned: {result}")
+                        
+                        # Create a function result frame (if your pipecat version supports it)
+                        # Otherwise, you might need to inject this back into the conversation context
+                        
+                    except Exception as e:
+                        logger.error(f"❌ Function {function_name} failed: {e}")
+                        result = f"Error: {str(e)}"
+        
+        await self.push_frame(frame, direction)
     """Simple Langfuse logger that logs key events"""
     def __init__(self, session_id: str):
         super().__init__()
@@ -258,13 +426,100 @@ class SimpleLangfuseLogger(FrameProcessor):
         
         await self.push_frame(frame, direction)
 
+class SimpleLangfuseLogger(FrameProcessor):
+    """Processor that injects workflow context into LLM messages and advances workflow"""
+    def __init__(self, workflow: HealthcareWorkflow):
+        super().__init__()
+        self.workflow = workflow
+        self.last_user_message = ""
+
+    async def process_frame(self, frame: Frame, direction: FrameDirection):
+        await super().process_frame(frame, direction)
+        
+        if isinstance(frame, LLMMessagesFrame) and frame.messages:
+            # Store user message for workflow advancement
+            messages = frame.messages.copy()
+            
+            # Find the last user message
+            for msg in reversed(messages):
+                if msg.get("role") == "user":
+                    self.last_user_message = msg.get("content", "")
+                    break
+            
+            # Check if we should advance workflow state based on user input
+            self._maybe_advance_workflow(self.last_user_message)
+            
+            # Update system message with current workflow state
+            system_prompt = self.workflow.get_system_prompt()
+            workflow_context = self.workflow.get_workflow_context()
+            
+            enhanced_system_prompt = f"""{system_prompt}
+
+IMPORTANT CONTEXT:
+- Current state: {workflow_context['current_state']}
+- Next action: {workflow_context['next_action']}
+- Patient data: {workflow_context.get('patient_data', 'None found yet')}
+- Collected info: {workflow_context.get('collected_info', 'None collected yet')}
+
+Remember: You are calling THEM. Be professional and direct about your purpose."""
+            
+            # Find and replace system message
+            for i, msg in enumerate(messages):
+                if msg.get("role") == "system":
+                    messages[i] = {"role": "system", "content": enhanced_system_prompt}
+                    break
+            else:
+                # No system message found, add one
+                messages.insert(0, {"role": "system", "content": enhanced_system_prompt})
+            
+            # Create new frame with updated messages
+            new_frame = LLMMessagesFrame(messages=messages)
+            await self.push_frame(new_frame, direction)
+        else:
+            await self.push_frame(frame, direction)
+    
+    def _maybe_advance_workflow(self, user_message: str):
+        """Advance workflow based on user input patterns"""
+        if not user_message:
+            return
+            
+        user_lower = user_message.lower()
+        current_state = self.workflow.state
+        
+        # Auto-advance workflow based on conversation patterns
+        if current_state == ConversationState.INITIAL_RESPONSE:
+            # If user asks for patient info or responds positively, move forward
+            if any(word in user_lower for word in ["patient", "name", "member", "information", "verify", "sure", "go ahead"]):
+                logger.info("User asking for patient info, advancing to patient info request")
+                self.workflow.advance_state()
+                
+        elif current_state == ConversationState.PATIENT_INFO_REQUEST:
+            # If user acknowledges patient info or asks about eligibility
+            if any(word in user_lower for word in ["found", "located", "active", "eligible", "coverage", "effective"]):
+                logger.info("User confirmed patient, advancing to eligibility verification")
+                self.workflow.advance_state()
+                
+        elif current_state == ConversationState.ELIGIBILITY_VERIFICATION:
+            # If user provides eligibility info or asks about benefits
+            if any(word in user_lower for word in ["active", "covered", "benefits", "copay", "deductible", "procedure"]):
+                logger.info("Moving to benefits inquiry")
+                self.workflow.advance_state()
+                
+        elif current_state == ConversationState.BENEFITS_INQUIRY:
+            # After getting benefits info, wrap up
+            if any(word in user_lower for word in ["covered", "approved", "that's all", "anything else", "help"]):
+                logger.info("Benefits verified, moving to completion")
+                self.workflow.advance_state()
+
 class HealthcareAIPipeline:
-    def __init__(self, session_id: str = "default"):
+    def __init__(self, session_id: str = "default", patient_id: str = None):
         self.transport = None
         self.pipeline = None
         self.runner = None
         self.session_id = session_id
+        self.patient_id = patient_id  # Store patient ID
         self.langfuse = None
+        self.workflow = HealthcareWorkflow(patient_id=patient_id)  # Pass patient_id to workflow
         self._init_langfuse()
         
     def _init_langfuse(self):
@@ -277,13 +532,13 @@ class HealthcareAIPipeline:
             self.langfuse = None
         
     def create_pipeline(self, url: str, token: str, room_name: str) -> Pipeline:
-        logger.info(f"Creating simple pipeline for room: {room_name}")
+        logger.info(f"Creating healthcare pipeline for room: {room_name}")
         
         params = LiveKitParams(
             api_key=os.getenv("LIVEKIT_API_KEY"),
             api_secret=os.getenv("LIVEKIT_API_SECRET"),
             audio_in_enabled=True,
-            audio_out_enabled=True,  # Explicitly enable audio output
+            audio_out_enabled=True,
             vad_enabled=True
         )
         
@@ -306,13 +561,15 @@ class HealthcareAIPipeline:
             )
         )
         
+        # Initial system message will be enhanced by workflow - START WITH GREETING
         initial_messages = [
-            {"role": "system", "content": "You are a helpful AI assistant. Keep responses brief and clear. Always acknowledge what the user said."}
+            {"role": "system", "content": self.workflow.get_system_prompt()}
         ]
         
         llm = OpenAILLMService(
             api_key=os.getenv("OPENAI_API_KEY"),
-            model="gpt-4o"
+            model="gpt-4o",
+            tools=PATIENT_FUNCTIONS  # Enable function calling
         )
         
         llm_context = OpenAILLMContext(messages=initial_messages)
@@ -328,8 +585,8 @@ class HealthcareAIPipeline:
                 tts_service = CartesiaTTSService(
                     api_key=os.getenv("CARTESIA_API_KEY"),
                     voice_id="a0e99841-438c-4a64-b679-ae501e7d6091",
-                    model="sonic-2",  # Use latest model name
-                    cartesia_version="2025-04-16"  # Use latest API version
+                    model="sonic-2",
+                    cartesia_version="2025-04-16"
                 )
                 logger.info("✅ Cartesia TTS service initialized successfully")
             except Exception as e:
@@ -342,7 +599,7 @@ class HealthcareAIPipeline:
                 from pipecat.services.openai.tts import OpenAITTSService
                 tts_service = OpenAITTSService(
                     api_key=os.getenv("OPENAI_API_KEY"),
-                    voice="alloy"  # or "echo", "fable", "onyx", "nova", "shimmer"
+                    voice="alloy"
                 )
                 logger.info("✅ OpenAI TTS service initialized successfully (fallback)")
             except Exception as e:
@@ -360,30 +617,37 @@ class HealthcareAIPipeline:
             IntermediateFrameLogger(),
             SimpleLangfuseLogger(self.session_id),
             context_aggregators.user(),
+            WorkflowAwareLLMContext(self.workflow),  # Inject workflow context
             LLMInputLogger(),
             llm,
+            FunctionCallHandler(patient_id=self.patient_id),  # Handle function calls
             LLMOutputLogger(),
             TTSInputLogger(),
             tts,
-            AudioOutputLogger(),  # Track TTS audio output
+            AudioOutputLogger(),
             context_aggregators.assistant(),
-            TransportOutputLogger(),  # Track what goes to transport
+            TransportOutputLogger(),
             self.transport.output()
         ])
         
-        logger.info("Simple pipeline created successfully")
+        logger.info("Healthcare pipeline created successfully with workflow integration")
         return self.pipeline
     
     def get_conversation_state(self) -> Dict[str, Any]:
+        """Get current conversation state including workflow"""
         return {
             "session_id": self.session_id,
-            "workflow_state": "active",
-            "workflow_context": {},
-            "conversation_summary": {"message_count": 0}
+            "workflow_state": self.workflow.state.value,
+            "workflow_context": self.workflow.get_workflow_context(),
+            "patient_data": self.workflow.patient_data,
+            "collected_info": self.workflow.collected_info
         }
     
     def get_optimization_suggestions(self) -> List[str]:
-        return ["Simple pipeline active with basic Langfuse logging"]
+        return [
+            f"Healthcare pipeline active with workflow state: {self.workflow.state.value}",
+            f"Next action: {self.workflow._get_next_action()}"
+        ]
     
     async def run(self, url: str, token: str, room_name: str):
         if not self.pipeline:
@@ -413,7 +677,7 @@ class HealthcareAIPipeline:
                 allow_interruptions=True,
                 enable_metrics=True,
             ),
-            enable_tracing=False,  # Disable pipecat's built-in tracing since the module doesn't exist
+            enable_tracing=False,
             conversation_id=self.session_id
         )
         
@@ -425,12 +689,16 @@ class HealthcareAIPipeline:
                 self.langfuse.event(
                     name="session_start",
                     session_id=self.session_id,
-                    metadata={"room_name": room_name, "timestamp": datetime.utcnow().isoformat()}
+                    metadata={
+                        "room_name": room_name, 
+                        "workflow_state": self.workflow.state.value,
+                        "timestamp": datetime.utcnow().isoformat()
+                    }
                 )
             except Exception as e:
                 logger.warning(f"Failed to log session start: {e}")
         
-        logger.info(f"Starting simple pipeline for session: {self.session_id}")
+        logger.info(f"Starting healthcare pipeline for session: {self.session_id}")
         
         try:
             await self.runner.run(task)

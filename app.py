@@ -6,17 +6,15 @@ import datetime
 from livekit import api
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import JSONResponse
-from fastapi.middleware.cors import CORSMiddleware  # Add this import
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from dotenv import load_dotenv
 import uvicorn
 import uuid
-from urllib.parse import urlparse, parse_qs
+from typing import Optional
 
 from pipeline import HealthcareAIPipeline
-from models import get_async_patient_db, AsyncPatientRecord
-from memory import MemoryManager
-from evaluations import HealthcareEvaluator
+from models import get_async_patient_db
 
 # Load environment variables
 load_dotenv()
@@ -37,24 +35,28 @@ app.add_middleware(
 )
 
 # Global instances
-patient_db = get_async_patient_db()
-memory_manager = MemoryManager()
-evaluator = HealthcareEvaluator()
 active_pipelines = {}
+patient_db = get_async_patient_db()
 
 class CallRequest(BaseModel):
-    room_url: str
-    token: str
-    session_id: str = None
+    patient_id: str  # Required: MongoDB ObjectId of the patient
+    room_url: Optional[str] = None
+    token: Optional[str] = None
+    session_id: Optional[str] = None
 
 @app.post("/start-call")
-async def start_call(request: CallRequest = None):  # Make request optional for simplicity
-    """Start a healthcare AI call session, auto-creating room and tokens"""
+async def start_call(request: CallRequest):
+    """Start a healthcare AI call session for a specific patient"""
     try:
-        # Generate session ID
-        session_id = str(uuid.uuid4())
+        # Validate patient exists
+        patient_data = await patient_db.find_patient_by_id(request.patient_id)
+        if not patient_data:
+            raise HTTPException(status_code=404, detail=f"Patient not found: {request.patient_id}")
         
-        logger.info(f"Starting optimized call for session: {session_id}")
+        # Generate session ID
+        session_id = request.session_id or str(uuid.uuid4())
+        
+        logger.info(f"Starting healthcare call for session: {session_id}, patient: {patient_data.get('patient_name')}")
         
         # Initialize LiveKit API client
         lk_api = api.LiveKitAPI(
@@ -64,10 +66,9 @@ async def start_call(request: CallRequest = None):  # Make request optional for 
         )
 
         # Create a room
-        room_name = f"healthcare-ai-session-{session_id[:8]}"  # Unique per session
+        room_name = f"healthcare-ai-session-{session_id[:8]}"
         room = await lk_api.room.create_room(api.CreateRoomRequest(name=room_name))
         base_url = os.getenv("LIVEKIT_URL")
-        # Don't add room parameters to the URL - LiveKit client will handle this
         room_url = base_url
 
         # Generate bot token
@@ -103,27 +104,78 @@ async def start_call(request: CallRequest = None):  # Make request optional for 
         # Close API client
         await lk_api.aclose()
 
-        # Create and run pipeline
-        pipeline = HealthcareAIPipeline(session_id=session_id)
+        # Create and run pipeline with patient_id
+        pipeline = HealthcareAIPipeline(session_id=session_id, patient_id=request.patient_id)
         active_pipelines[session_id] = pipeline
         asyncio.create_task(pipeline.run(base_url, bot_token, room_name))
         
         return {
             "status": "success",
             "session_id": session_id,
+            "patient_id": request.patient_id,
+            "patient_name": patient_data.get('patient_name'),
+            "facility_name": patient_data.get('facility_name'),
             "room_url": room_url,
             "room_name": room_name,
             "user_token": user_token,
-            "message": "Call started successfully. Use user_token to join the room."
+            "message": f"Call started for {patient_data.get('patient_name')} at {patient_data.get('facility_name')}. Use user_token to join the room."
         }
         
     except Exception as e:
         logger.error(f"Error starting call: {str(e)}\n{traceback.format_exc()}")
         raise HTTPException(status_code=500, detail=f"Failed to start call: {str(e)}")
 
+@app.get("/patients")
+async def get_patients():
+    """Get list of patients available for calling"""
+    try:
+        # Get patients with pending authorization
+        pending_patients = await patient_db.find_patients_pending_auth()
+        
+        patients = []
+        for patient in pending_patients[:10]:  # Limit to 10 for demo
+            patients.append({
+                "patient_id": str(patient["_id"]),
+                "patient_name": patient.get("patient_name"),
+                "facility_name": patient.get("facility_name"),
+                "insurance_company": patient.get("insurance_company_name"),
+                "prior_auth_status": patient.get("prior_auth_status"),
+                "appointment_time": patient.get("appointment_time")
+            })
+        
+        return {
+            "patients": patients,
+            "total_count": len(pending_patients)
+        }
+        
+    except Exception as e:
+        logger.error(f"Error getting patients: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/patient/{patient_id}")
+async def get_patient_details(patient_id: str):
+    """Get detailed information about a specific patient"""
+    try:
+        patient = await patient_db.find_patient_by_id(patient_id)
+        if not patient:
+            raise HTTPException(status_code=404, detail="Patient not found")
+        
+        # Remove MongoDB ObjectId for JSON serialization
+        patient_data = dict(patient)
+        patient_data["_id"] = str(patient_data["_id"])
+        
+        return {
+            "patient": patient_data,
+            "ready_for_call": patient_data.get("prior_auth_status") == "Pending"
+        }
+        
+    except Exception as e:
+        logger.error(f"Error getting patient details: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
 @app.get("/conversation-state/{session_id}")
 async def get_conversation_state(session_id: str):
-    """Get current conversation state with performance metrics"""
+    """Get current conversation state"""
     try:
         if session_id not in active_pipelines:
             raise HTTPException(status_code=404, detail="Session not found")
@@ -133,89 +185,15 @@ async def get_conversation_state(session_id: str):
         
         return {
             "session_id": session_id,
+            "patient_id": pipeline.patient_id,
             "workflow_state": state["workflow_state"],
-            "message_count": state["conversation_summary"]["message_count"],
-            "patient_found": state["workflow_context"]["patient_data"] is not None,
-            "performance_metrics": state.get("performance_metrics", {}),
-            "optimization_suggestions": pipeline.get_optimization_suggestions()
+            "workflow_context": state["workflow_context"],
+            "patient_data": state["patient_data"],
+            "collected_info": state["collected_info"]
         }
         
     except Exception as e:
         logger.error(f"Error getting conversation state: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-@app.post("/evaluate-session/{session_id}")
-async def evaluate_session(session_id: str):
-    """Run evaluation on a session"""
-    try:
-        if session_id not in active_pipelines:
-            raise HTTPException(status_code=404, detail="Session not found")
-        
-        pipeline = active_pipelines[session_id]
-        
-        # Quick evaluation using default test case
-        test_case = evaluator.test_cases[0]  # Use first test case
-        results = await evaluator.run_comprehensive_evaluation(pipeline, test_case)
-        
-        return {
-            "session_id": session_id,
-            "evaluation_results": {k: v.score for k, v in results.items()},
-            "detailed_metrics": {k: v.details for k, v in results.items()}
-        }
-        
-    except Exception as e:
-        logger.error(f"Error evaluating session: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-@app.get("/performance-report")
-async def get_performance_report():
-    """Get overall system performance report"""
-    try:
-        # Aggregate metrics from all active sessions
-        total_metrics = {
-            "active_sessions": len(active_pipelines),
-            "average_latency": 0.0,
-            "average_quality": 0.0,
-            "total_interruptions": 0
-        }
-        
-        if active_pipelines:
-            latencies = []
-            qualities = []
-            interruptions = []
-            
-            for pipeline in active_pipelines.values():
-                state = pipeline.get_conversation_state()
-                perf_metrics = state.get("performance_metrics", {})
-                interruption_metrics = state.get("interruption_analytics", {})
-                audio_metrics = state.get("audio_quality", {})
-                
-                if perf_metrics.get("average_total_latency_ms"):
-                    latencies.append(perf_metrics["average_total_latency_ms"])
-                
-                if audio_metrics.get("average_quality_score"):
-                    qualities.append(audio_metrics["average_quality_score"])
-                
-                if interruption_metrics.get("total_interruptions"):
-                    interruptions.append(interruption_metrics["total_interruptions"])
-            
-            total_metrics.update({
-                "average_latency": sum(latencies) / len(latencies) if latencies else 0.0,
-                "average_quality": sum(qualities) / len(qualities) if qualities else 0.0,
-                "total_interruptions": sum(interruptions)
-            })
-        
-        # Get evaluation report
-        eval_report = evaluator.generate_evaluation_report()
-        
-        return {
-            "system_metrics": total_metrics,
-            "evaluation_summary": eval_report.get("performance_summary", {}),
-            "recommendations": eval_report.get("recommendations", [])
-        }
-        
-    except Exception as e:
-        logger.error(f"Error generating performance report: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/end-call/{session_id}")
@@ -225,16 +203,17 @@ async def end_call(session_id: str):
         if session_id in active_pipelines:
             pipeline = active_pipelines[session_id]
             final_state = pipeline.get_conversation_state()
+            patient_id = pipeline.patient_id
             
             # Cleanup
             del active_pipelines[session_id]
-            memory_manager.end_conversation(session_id)
             
-            logger.info(f"Ended optimized call session: {session_id}")
+            logger.info(f"Ended healthcare call session: {session_id}")
             return {
                 "status": "success", 
-                "final_performance": final_state.get("performance_metrics", {}),
-                "optimization_suggestions": pipeline.get_optimization_suggestions()
+                "session_id": session_id,
+                "patient_id": patient_id,
+                "final_state": final_state["workflow_state"]
             }
         else:
             raise HTTPException(status_code=404, detail="Session not found")
@@ -245,19 +224,17 @@ async def end_call(session_id: str):
 
 @app.get("/active-sessions")
 async def get_active_sessions():
-    """Get list of active call sessions with performance summary"""
+    """Get list of active call sessions"""
     sessions = []
     
     for session_id, pipeline in active_pipelines.items():
         state = pipeline.get_conversation_state()
-        perf_metrics = state.get("performance_metrics", {})
         
         sessions.append({
             "session_id": session_id,
+            "patient_id": pipeline.patient_id,
             "workflow_state": state["workflow_state"],
-            "duration_minutes": state["conversation_summary"].get("duration_minutes", 0),
-            "average_latency": perf_metrics.get("average_total_latency_ms", 0),
-            "performance_ratio": perf_metrics.get("performance_ratio", 0)
+            "has_patient_data": state["patient_data"] is not None
         })
     
     return {
@@ -265,46 +242,103 @@ async def get_active_sessions():
         "session_count": len(active_pipelines)
     }
 
+@app.post("/start-call-quick/{patient_id}")
+async def start_call_quick(patient_id: str):
+    """Quick start call for a specific patient (convenience endpoint)"""
+    request = CallRequest(patient_id=patient_id)
+    return await start_call(request)
+
+@app.get("/facilities")
+async def get_facilities():
+    """Get list of facilities with pending patients"""
+    try:
+        pending_patients = await patient_db.find_patients_pending_auth()
+        
+        # Group by facility
+        facilities = {}
+        for patient in pending_patients:
+            facility_name = patient.get("facility_name", "Unknown")
+            if facility_name not in facilities:
+                facilities[facility_name] = {
+                    "facility_name": facility_name,
+                    "pending_count": 0,
+                    "patients": []
+                }
+            
+            facilities[facility_name]["pending_count"] += 1
+            facilities[facility_name]["patients"].append({
+                "patient_id": str(patient["_id"]),
+                "patient_name": patient.get("patient_name"),
+                "insurance_company": patient.get("insurance_company_name")
+            })
+        
+        return {
+            "facilities": list(facilities.values()),
+            "total_facilities": len(facilities)
+        }
+        
+    except Exception as e:
+        logger.error(f"Error getting facilities: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
 @app.get("/health")
 async def health_check():
-    """Health check endpoint with system status"""
-    system_status = {
+    """Health check endpoint with database connectivity"""
+    try:
+        # Test database connection
+        db_status = "connected"
+        patient_count = len(await patient_db.find_patients_pending_auth())
+    except Exception as e:
+        db_status = f"error: {str(e)}"
+        patient_count = 0
+    
+    return {
         "status": "healthy",
         "service": "healthcare-ai-agent",
         "active_sessions": len(active_pipelines),
-        "optimization_enabled": True
+        "database_status": db_status,
+        "pending_patients": patient_count
     }
-    
-    # Check if any sessions are having performance issues
-    if active_pipelines:
-        high_latency_sessions = []
-        for session_id, pipeline in active_pipelines.items():
-            state = pipeline.get_conversation_state()
-            perf_metrics = state.get("performance_metrics", {})
-            if perf_metrics.get("performance_ratio", 0) > 1.5:  # 50% over target
-                high_latency_sessions.append(session_id)
-        
-        if high_latency_sessions:
-            system_status["warnings"] = f"High latency detected in {len(high_latency_sessions)} sessions"
-    
-    return system_status
 
 @app.get("/")
 async def root():
     return {
-        "message": "Healthcare AI Agent API - Optimized MVP", 
+        "message": "Healthcare AI Agent API - Insurance Verification", 
         "version": "1.0.0",
-        "features": ["function_calling", "workflow_management", "latency_optimization", "interruption_handling", "audio_processing"]
+        "features": [
+            "insurance_verification", 
+            "voice_pipeline", 
+            "patient_data_integration",
+            "function_calling",
+            "workflow_management"
+        ],
+        "endpoints": {
+            "start_call": "POST /start-call (requires patient_id)",
+            "quick_start": "POST /start-call-quick/{patient_id}",
+            "patients": "GET /patients (list pending patients)",
+            "patient_details": "GET /patient/{patient_id}",
+            "facilities": "GET /facilities (grouped by facility)",
+            "conversation_state": "GET /conversation-state/{session_id}",
+            "active_sessions": "GET /active-sessions",
+            "end_call": "POST /end-call/{session_id}"
+        }
     }
 
 if __name__ == "__main__":
     # Validate required environment variables
-    required_vars = ["OPENAI_API_KEY", "DEEPGRAM_API_KEY", "CARTESIA_API_KEY"]
+    required_vars = [
+        "OPENAI_API_KEY", 
+        "DEEPGRAM_API_KEY", 
+        "LIVEKIT_API_KEY", 
+        "LIVEKIT_API_SECRET", 
+        "LIVEKIT_URL",
+        "MONGO_URI"
+    ]
     missing_vars = [var for var in required_vars if not os.getenv(var)]
     
     if missing_vars:
         logger.error(f"Missing required environment variables: {missing_vars}")
         exit(1)
     
-    logger.info("Starting Healthcare AI Agent server with optimizations...")
+    logger.info("Starting Healthcare AI Agent server...")
     uvicorn.run(app, host="0.0.0.0", port=8000)

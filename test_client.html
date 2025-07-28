@@ -8,7 +8,7 @@
     <style>
         body {
             font-family: Arial, sans-serif;
-            max-width: 800px;
+            max-width: 900px;
             margin: 0 auto;
             padding: 20px;
             background-color: #f5f5f5;
@@ -43,9 +43,22 @@
             background-color: #ccc; 
             cursor: not-allowed; 
         }
+        button.secondary {
+            background-color: #757575;
+        }
+        button.secondary:hover {
+            background-color: #616161;
+        }
         .controls {
             margin: 20px 0;
             text-align: center;
+        }
+        .patient-controls {
+            background-color: #f8f9fa;
+            padding: 20px;
+            border-radius: 5px;
+            margin: 20px 0;
+            border: 1px solid #e9ecef;
         }
         .audio-controls {
             display: flex;
@@ -71,12 +84,52 @@
             border-radius: 4px;
             margin: 5px;
         }
+        .patient-input {
+            width: 400px !important;
+            font-family: monospace;
+        }
         .instructions {
             background-color: #e3f2fd;
             padding: 15px;
             border-radius: 5px;
             margin-bottom: 20px;
             border-left: 4px solid #2196f3;
+        }
+        .patient-info {
+            background-color: #e8f5e8;
+            padding: 15px;
+            border-radius: 5px;
+            margin: 10px 0;
+            border-left: 4px solid #4caf50;
+        }
+        .patient-list {
+            max-height: 200px;
+            overflow-y: auto;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            margin: 10px 0;
+        }
+        .patient-item {
+            padding: 10px;
+            border-bottom: 1px solid #eee;
+            cursor: pointer;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        .patient-item:hover {
+            background-color: #f5f5f5;
+        }
+        .patient-item:last-child {
+            border-bottom: none;
+        }
+        .patient-details {
+            flex: 1;
+        }
+        .patient-id {
+            font-family: monospace;
+            font-size: 12px;
+            color: #666;
         }
     </style>
 </head>
@@ -88,15 +141,38 @@
             <h3>Instructions:</h3>
             <ol>
                 <li>Make sure your FastAPI server is running on localhost:8000</li>
-                <li>Click "Get New Session" to create a room and get a token</li>
+                <li>Either browse available patients or manually enter a patient ID</li>
+                <li>Click "Start Call for Patient" to create a room with the patient context</li>
                 <li>Click "Connect to Room" to join the voice call</li>
                 <li>Allow microphone permissions when prompted</li>
-                <li>Speak into your microphone to talk to the AI agent</li>
+                <li>Speak into your microphone - the AI will act as MyRobot calling about insurance verification</li>
             </ol>
         </div>
 
+        <div class="patient-controls">
+            <h3>Patient Selection</h3>
+            
+            <div style="margin-bottom: 15px;">
+                <button onclick="loadPatients()" class="secondary">Load Available Patients</button>
+                <span id="patientCount"></span>
+            </div>
+            
+            <div id="patientList" class="patient-list" style="display: none;"></div>
+            
+            <div style="margin: 15px 0;">
+                <strong>OR</strong> manually enter Patient ID:
+            </div>
+            
+            <div>
+                <input type="text" id="patientId" class="patient-input" placeholder="Enter MongoDB ObjectId (e.g., 668131f380921c8f2f7567d3)">
+                <button onclick="validatePatient()">Validate Patient</button>
+            </div>
+            
+            <div id="patientInfo" style="display: none;"></div>
+        </div>
+
         <div class="controls">
-            <button id="getSessionBtn" onclick="getNewSession()">Get New Session</button>
+            <button id="startCallBtn" onclick="startCallForPatient()" disabled>Start Call for Patient</button>
             <button id="connectBtn" onclick="connectToRoom()" disabled>Connect to Room</button>
             <button id="disconnectBtn" onclick="disconnectFromRoom()" disabled>Disconnect</button>
         </div>
@@ -109,17 +185,14 @@
         </div>
 
         <div class="status disconnected" id="connectionStatus">
-            Disconnected - Click "Get New Session" to start
+            Disconnected - Select a patient and click "Start Call for Patient"
         </div>
 
         <div>
-            <h3>Room URL:</h3>
-            <input type="text" id="roomUrl" placeholder="Room URL will appear here..." readonly>
-        </div>
-        
-        <div>
-            <h3>User Token:</h3>
-            <input type="text" id="userToken" placeholder="User token will appear here..." readonly>
+            <h3>Session Info:</h3>
+            <div>Session ID: <input type="text" id="sessionId" placeholder="Session ID will appear here..." readonly></div>
+            <div>Room URL: <input type="text" id="roomUrl" placeholder="Room URL will appear here..." readonly></div>
+            <div>User Token: <input type="text" id="userToken" placeholder="User token will appear here..." readonly></div>
         </div>
 
         <div>
@@ -132,16 +205,12 @@
         let room = null;
         let localAudioTrack = null;
         let sessionData = null;
+        let selectedPatientId = null;
+        let currentPatientData = null;
 
-        // Fix LiveKit client reference - the library loads as 'LivekitClient' not 'LiveKitClient'
+        // Fix LiveKit client reference
         window.addEventListener('load', function() {
-            // Debug what's available
             console.log('Checking for LiveKit library...');
-            console.log('window.LivekitClient:', typeof window.LivekitClient);
-            console.log('window.LiveKitClient:', typeof window.LiveKitClient);
-            console.log('window.LiveKit:', typeof window.LiveKit);
-            
-            // The library actually loads as 'LivekitClient' (lowercase k)
             if (window.LivekitClient) {
                 window.LiveKitClient = window.LivekitClient;
                 console.log('✅ LiveKit client found and set up correctly');
@@ -165,16 +234,175 @@
             statusElement.className = `status ${className}`;
         }
 
+        async function loadPatients() {
+            try {
+                log('Loading available patients...');
+                const response = await fetch('http://localhost:8000/patients');
+                
+                if (!response.ok) {
+                    throw new Error(`HTTP error! status: ${response.status}`);
+                }
+                
+                const data = await response.json();
+                const patients = data.patients;
+                
+                document.getElementById('patientCount').textContent = `(${patients.length} patients available)`;
+                
+                const patientListDiv = document.getElementById('patientList');
+                patientListDiv.innerHTML = '';
+                
+                if (patients.length === 0) {
+                    patientListDiv.innerHTML = '<div style="padding: 20px; text-align: center; color: #666;">No patients with pending authorization found</div>';
+                } else {
+                    patients.forEach(patient => {
+                        const patientDiv = document.createElement('div');
+                        patientDiv.className = 'patient-item';
+                        patientDiv.onclick = () => selectPatient(patient.patient_id, patient);
+                        
+                        patientDiv.innerHTML = `
+                            <div class="patient-details">
+                                <strong>${patient.patient_name}</strong><br>
+                                <small>${patient.facility_name} | ${patient.insurance_company}</small><br>
+                                <span class="patient-id">${patient.patient_id}</span>
+                            </div>
+                            <div>
+                                <small>${patient.prior_auth_status}</small>
+                            </div>
+                        `;
+                        
+                        patientListDiv.appendChild(patientDiv);
+                    });
+                }
+                
+                patientListDiv.style.display = 'block';
+                log(`Loaded ${patients.length} patients`);
+                
+            } catch (error) {
+                log(`Error loading patients: ${error.message}`);
+                document.getElementById('patientCount').textContent = '(Error loading patients)';
+            }
+        }
+
+        function selectPatient(patientId, patientData = null) {
+            selectedPatientId = patientId;
+            document.getElementById('patientId').value = patientId;
+            
+            if (patientData) {
+                showPatientInfo(patientData);
+                currentPatientData = patientData;
+                document.getElementById('startCallBtn').disabled = false;
+                log(`Selected patient: ${patientData.patient_name} (${patientId})`);
+            } else {
+                validatePatient();
+            }
+        }
+
+        async function validatePatient() {
+            const patientId = document.getElementById('patientId').value.trim();
+            
+            if (!patientId) {
+                log('Please enter a patient ID');
+                return;
+            }
+            
+            try {
+                log(`Validating patient ID: ${patientId}`);
+                const response = await fetch(`http://localhost:8000/patient/${patientId}`);
+                
+                if (!response.ok) {
+                    if (response.status === 404) {
+                        throw new Error('Patient not found');
+                    }
+                    throw new Error(`HTTP error! status: ${response.status}`);
+                }
+                
+                const data = await response.json();
+                const patient = data.patient;
+                
+                selectedPatientId = patientId;
+                currentPatientData = {
+                    patient_id: patientId,
+                    patient_name: patient.patient_name,
+                    facility_name: patient.facility_name,
+                    insurance_company: patient.insurance_company_name,
+                    prior_auth_status: patient.prior_auth_status
+                };
+                
+                showPatientInfo(currentPatientData);
+                document.getElementById('startCallBtn').disabled = false;
+                
+                log(`✅ Patient validated: ${patient.patient_name}`);
+                
+            } catch (error) {
+                log(`❌ Patient validation failed: ${error.message}`);
+                document.getElementById('patientInfo').style.display = 'none';
+                document.getElementById('startCallBtn').disabled = true;
+            }
+        }
+
+        function showPatientInfo(patient) {
+            const patientInfoDiv = document.getElementById('patientInfo');
+            patientInfoDiv.innerHTML = `
+                <div class="patient-info">
+                    <h4>Selected Patient:</h4>
+                    <strong>${patient.patient_name}</strong><br>
+                    <strong>Facility:</strong> ${patient.facility_name}<br>
+                    <strong>Insurance:</strong> ${patient.insurance_company}<br>
+                    <strong>Status:</strong> ${patient.prior_auth_status}<br>
+                    <strong>Patient ID:</strong> <code>${patient.patient_id}</code>
+                </div>
+            `;
+            patientInfoDiv.style.display = 'block';
+        }
+
+        async function startCallForPatient() {
+            if (!selectedPatientId) {
+                log('No patient selected');
+                return;
+            }
+            
+            try {
+                log(`Starting call for patient: ${selectedPatientId}`);
+                updateStatus('Creating session...', 'connecting');
+                
+                const response = await fetch('http://localhost:8000/start-call', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({
+                        patient_id: selectedPatientId
+                    })
+                });
+                
+                if (!response.ok) {
+                    const errorData = await response.json();
+                    throw new Error(errorData.detail || `HTTP error! status: ${response.status}`);
+                }
+                
+                sessionData = await response.json();
+                
+                document.getElementById('sessionId').value = sessionData.session_id;
+                document.getElementById('roomUrl').value = sessionData.room_url;
+                document.getElementById('userToken').value = sessionData.user_token;
+                document.getElementById('connectBtn').disabled = false;
+                
+                log(`✅ Session created: ${sessionData.session_id}`);
+                log(`📞 Call started for: ${sessionData.patient_name} at ${sessionData.facility_name}`);
+                log(`🏥 Room: ${sessionData.room_name}`);
+                updateStatus(`Session ready for ${sessionData.patient_name} - Click "Connect to Room"`, 'connecting');
+                
+            } catch (error) {
+                log(`❌ Error starting call: ${error.message}`);
+                updateStatus('Error starting call', 'disconnected');
+            }
+        }
+
         function setupAudioLevelMonitoring(mediaStreamTrack) {
             try {
-                // Create audio context
                 const audioContext = new (window.AudioContext || window.webkitAudioContext)();
-                
-                // Create media stream from track
                 const stream = new MediaStream([mediaStreamTrack]);
                 const source = audioContext.createMediaStreamSource(stream);
-                
-                // Create analyser
                 const analyser = audioContext.createAnalyser();
                 analyser.fftSize = 512;
                 analyser.minDecibels = -90;
@@ -185,35 +413,28 @@
                 
                 const bufferLength = analyser.frequencyBinCount;
                 const dataArray = new Uint8Array(bufferLength);
-                
                 let isMonitoring = true;
                 
                 function checkAudioLevel() {
                     if (!isMonitoring) return;
                     
                     analyser.getByteFrequencyData(dataArray);
-                    
-                    // Calculate average volume
                     let sum = 0;
                     for (let i = 0; i < bufferLength; i++) {
                         sum += dataArray[i];
                     }
                     const average = sum / bufferLength;
                     
-                    // Log if speaking (threshold of 20)
                     if (average > 20) {
                         log(`🎤 Speaking detected (level: ${Math.round(average)})`);
                     }
                     
-                    // Continue monitoring
                     requestAnimationFrame(checkAudioLevel);
                 }
                 
-                // Start monitoring
                 checkAudioLevel();
                 log('Audio level monitoring started successfully');
                 
-                // Store cleanup function
                 window.audioMonitorCleanup = () => {
                     isMonitoring = false;
                     if (audioContext.state !== 'closed') {
@@ -224,37 +445,6 @@
             } catch (error) {
                 log(`Audio monitoring setup failed: ${error.message}`);
                 console.error('Audio monitoring error:', error);
-            }
-        }
-
-        async function getNewSession() {
-            try {
-                log('Requesting new session from server...');
-                const response = await fetch('http://localhost:8000/start-call', {
-                    method: 'POST',
-                    headers: {
-                        'Content-Type': 'application/json',
-                    }
-                });
-                
-                if (!response.ok) {
-                    throw new Error(`HTTP error! status: ${response.status}`);
-                }
-                
-                sessionData = await response.json();
-                
-                document.getElementById('roomUrl').value = sessionData.room_url;
-                document.getElementById('userToken').value = sessionData.user_token;
-                document.getElementById('connectBtn').disabled = false;
-                
-                log(`Session created: ${sessionData.session_id}`);
-                log(`Room URL: ${sessionData.room_url}`);
-                log(`Room Name: ${sessionData.room_name || 'Not provided'}`);
-                updateStatus('Session ready - Click "Connect to Room"', 'connecting');
-                
-            } catch (error) {
-                log(`Error getting session: ${error.message}`);
-                updateStatus('Error getting session', 'disconnected');
             }
         }
 
@@ -294,7 +484,7 @@
                 room.on(LiveKitClient.RoomEvent.ParticipantConnected, (participant) => {
                     log(`Participant connected: ${participant.identity}`);
                     if (participant.identity === 'healthcare-bot') {
-                        updateStatus('AI Agent connected - Ready to talk!', 'connected');
+                        updateStatus(`🤖 MyRobot connected - Say "Hello, thank you for calling [Insurance Company], my name is [Name]. May I have your first and last name?"`, 'connected');
                     }
                 });
 
@@ -302,9 +492,8 @@
                     log(`Track subscribed from ${participant.identity}: ${track.kind}`);
                     
                     if (track.kind === LiveKitClient.Track.Kind.Audio && participant.identity === 'healthcare-bot') {
-                        log('AI agent audio track received - you should be able to hear responses');
+                        log('🔊 AI agent audio track received - you should hear MyRobot respond');
                         
-                        // Create audio element to play the AI's audio
                         const audioElement = track.attach();
                         audioElement.autoplay = true;
                         audioElement.style.display = 'none';
@@ -317,13 +506,8 @@
                     track.detach();
                 });
 
-                // Connect to room
-                log(`Connecting to: ${sessionData.room_url}`);
-                log(`Using token: ${sessionData.user_token.substring(0, 20)}...`);
-                
                 await room.connect(sessionData.room_url, sessionData.user_token);
 
-                // Enable microphone
                 try {
                     localAudioTrack = await LiveKitClient.createLocalAudioTrack({
                         deviceId: 'default',
@@ -333,17 +517,15 @@
                         source: LiveKitClient.Track.Source.Microphone,
                     });
                     
-                    log('Microphone enabled and published');
+                    log('🎤 Microphone enabled and published');
                     document.getElementById('audioStatus').textContent = 'Microphone: Active';
                     
-                    // Add audio level monitoring
                     if (localAudioTrack.mediaStreamTrack) {
-                        log('Setting up microphone level monitoring...');
                         setupAudioLevelMonitoring(localAudioTrack.mediaStreamTrack);
                     }
                     
                 } catch (error) {
-                    log(`Error enabling microphone: ${error.message}`);
+                    log(`❌ Error enabling microphone: ${error.message}`);
                     document.getElementById('audioStatus').textContent = 'Microphone: Error';
                 }
 
@@ -351,13 +533,12 @@
                 document.getElementById('disconnectBtn').disabled = false;
 
             } catch (error) {
-                log(`Error connecting to room: ${error.message}`);
+                log(`❌ Error connecting to room: ${error.message}`);
                 updateStatus('Connection failed', 'disconnected');
             }
         }
 
         async function disconnectFromRoom() {
-            // Cleanup audio monitoring
             if (window.audioMonitorCleanup) {
                 window.audioMonitorCleanup();
                 window.audioMonitorCleanup = null;
@@ -374,6 +555,8 @@
             
             document.getElementById('audioStatus').textContent = 'Microphone: Not connected';
             document.getElementById('micMute').checked = false;
+            document.getElementById('connectBtn').disabled = false;
+            document.getElementById('disconnectBtn').disabled = true;
         }
 
         function toggleMicrophone() {
@@ -392,7 +575,8 @@
         }
 
         // Initialize
-        log('Web client loaded - Ready to start');
+        log('Healthcare AI Test Client loaded - Select a patient to start');
+        log('💡 Tip: Load available patients or manually enter a patient ID from your MongoDB');
     </script>
 </body>
 </html>
