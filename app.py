@@ -40,9 +40,6 @@ patient_db = get_async_patient_db()
 
 class CallRequest(BaseModel):
     patient_id: str  # Required: MongoDB ObjectId of the patient
-    room_url: Optional[str] = None
-    token: Optional[str] = None
-    session_id: Optional[str] = None
 
 @app.post("/start-call")
 async def start_call(request: CallRequest):
@@ -54,7 +51,7 @@ async def start_call(request: CallRequest):
             raise HTTPException(status_code=404, detail=f"Patient not found: {request.patient_id}")
         
         # Generate session ID
-        session_id = request.session_id or str(uuid.uuid4())
+        session_id = str(uuid.uuid4())
         
         logger.info(f"Starting healthcare call for session: {session_id}, patient: {patient_data.get('patient_name')}")
         
@@ -152,27 +149,6 @@ async def get_patients():
         logger.error(f"Error getting patients: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
-@app.get("/patient/{patient_id}")
-async def get_patient_details(patient_id: str):
-    """Get detailed information about a specific patient"""
-    try:
-        patient = await patient_db.find_patient_by_id(patient_id)
-        if not patient:
-            raise HTTPException(status_code=404, detail="Patient not found")
-        
-        # Remove MongoDB ObjectId for JSON serialization
-        patient_data = dict(patient)
-        patient_data["_id"] = str(patient_data["_id"])
-        
-        return {
-            "patient": patient_data,
-            "ready_for_call": patient_data.get("prior_auth_status") == "Pending"
-        }
-        
-    except Exception as e:
-        logger.error(f"Error getting patient details: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
-
 @app.get("/conversation-state/{session_id}")
 async def get_conversation_state(session_id: str):
     """Get current conversation state"""
@@ -242,45 +218,6 @@ async def get_active_sessions():
         "session_count": len(active_pipelines)
     }
 
-@app.post("/start-call-quick/{patient_id}")
-async def start_call_quick(patient_id: str):
-    """Quick start call for a specific patient (convenience endpoint)"""
-    request = CallRequest(patient_id=patient_id)
-    return await start_call(request)
-
-@app.get("/facilities")
-async def get_facilities():
-    """Get list of facilities with pending patients"""
-    try:
-        pending_patients = await patient_db.find_patients_pending_auth()
-        
-        # Group by facility
-        facilities = {}
-        for patient in pending_patients:
-            facility_name = patient.get("facility_name", "Unknown")
-            if facility_name not in facilities:
-                facilities[facility_name] = {
-                    "facility_name": facility_name,
-                    "pending_count": 0,
-                    "patients": []
-                }
-            
-            facilities[facility_name]["pending_count"] += 1
-            facilities[facility_name]["patients"].append({
-                "patient_id": str(patient["_id"]),
-                "patient_name": patient.get("patient_name"),
-                "insurance_company": patient.get("insurance_company_name")
-            })
-        
-        return {
-            "facilities": list(facilities.values()),
-            "total_facilities": len(facilities)
-        }
-        
-    except Exception as e:
-        logger.error(f"Error getting facilities: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
-
 @app.get("/health")
 async def health_check():
     """Health check endpoint with database connectivity"""
@@ -314,10 +251,7 @@ async def root():
         ],
         "endpoints": {
             "start_call": "POST /start-call (requires patient_id)",
-            "quick_start": "POST /start-call-quick/{patient_id}",
             "patients": "GET /patients (list pending patients)",
-            "patient_details": "GET /patient/{patient_id}",
-            "facilities": "GET /facilities (grouped by facility)",
             "conversation_state": "GET /conversation-state/{session_id}",
             "active_sessions": "GET /active-sessions",
             "end_call": "POST /end-call/{session_id}"
