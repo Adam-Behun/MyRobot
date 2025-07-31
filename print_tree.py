@@ -2,8 +2,8 @@ import os
 
 def print_directory_tree(path='.', level=0):
     ignore = {
-        '.github', '.git', '__pycache__', 'static', 'venv', '.next', 'node_modules',
-        'package-lock.json', '.gitignore', 'notes.txt', 'README.md', 'tasks.md'
+        '.github', 'fine-tune', '.git', '__pycache__', 'static', 'venv', '.next', 'node_modules',
+        'package-lock.json', '.gitignore', 'notes.txt', 'README.md', 'tasks.md', 'Notes.md', 'print_tree.py'
     }  # Ignore these files/folders
     items = sorted(os.listdir(path))
     for i, item in enumerate(items):

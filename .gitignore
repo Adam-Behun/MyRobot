@@ -2,6 +2,15 @@
 .env
 
 debug_audio.wav
+real1.txt
+real2.txt
+real3.txt
+real4.txt
+real5.txt
+ThePerfectFineTuningTranscript.txt
+14FineTuningExamples.txt
+fine-tune/
+Notes.md
 
 # Python
 __pycache__/
