@@ -45,10 +45,13 @@ class CallRequest(BaseModel):
 async def start_call(request: CallRequest):
     """Start a healthcare AI call session for a specific patient"""
     try:
-        # Validate patient exists
+        # Validate patient exists and fetch full record
         patient_data = await patient_db.find_patient_by_id(request.patient_id)
         if not patient_data:
             raise HTTPException(status_code=404, detail=f"Patient not found: {request.patient_id}")
+        
+        # Convert _id to string for serialization and LLM use
+        patient_data['_id'] = str(patient_data['_id'])
         
         # Generate session ID
         session_id = str(uuid.uuid4())
@@ -101,8 +104,8 @@ async def start_call(request: CallRequest):
         # Close API client
         await lk_api.aclose()
 
-        # Create and run pipeline with patient_id
-        pipeline = HealthcareAIPipeline(session_id=session_id, patient_id=request.patient_id)
+        # Create and run pipeline with patient_id and full patient_data
+        pipeline = HealthcareAIPipeline(session_id=session_id, patient_id=request.patient_id, patient_data=patient_data)
         active_pipelines[session_id] = pipeline
         asyncio.create_task(pipeline.run(base_url, bot_token, room_name))
         

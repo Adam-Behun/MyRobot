@@ -410,7 +410,7 @@
                 room.on(LiveKitClient.RoomEvent.ParticipantConnected, (participant) => {
                     log(`Participant connected: ${participant.identity}`);
                     if (participant.identity === 'healthcare-bot') {
-                        updateStatus(`🤖 MyRobot connected - Say "Hello, thank you for calling [Insurance Company], my name is [Name]. May I have your first and last name?"`, 'connected');
+                        updateStatus(`🤖 MyRobot connected.`);
                     }
                 });
 
