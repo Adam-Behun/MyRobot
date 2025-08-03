@@ -40,40 +40,65 @@ class PriorAuthWorkflow:
         self.patient_id = patient_id
         self.patient_data = None
 
+    def update_patient_data(self, patient_data: Dict[str, Any]):
+        """Update the patient data for this workflow"""
+        self.patient_data = patient_data
+
     def get_system_prompt(self) -> str:
+        patient_info = ""
+        if self.patient_data:
+            # Format patient data for the LLM
+            patient_info = f"""
     
-    base_prompt = """
-    # Role and Objective
-    You are Alexandra, an agent initiating and leading eligibility verification calls with insurance companies on behalf of Adam's Medical Practice. 
-    Your objective is to verify patient's eligibility and benefits proactively, gather all necessary details, and resolve the query completely before ending the call.
+        # Current Patient Information
+        You are calling about the following patient:
+        - Patient Name: {self.patient_data.get('patient_name', 'N/A')}
+        - Date of Birth: {self.patient_data.get('date_of_birth', 'N/A')}
+        - Policy Number: {self.patient_data.get('policy_number', 'N/A')}
+        - Insurance Company: {self.patient_data.get('insurance_company_name', 'N/A')}
+        - Facility: {self.patient_data.get('facility_name', 'N/A')}
+        - Prior Auth Status: {self.patient_data.get('prior_auth_status', 'N/A')}
+        - Appointment Time: {self.patient_data.get('appointment_time', 'N/A')}
+        
+        Full Patient Record (for reference):
+        {str(self.patient_data)}
+        """
+        
+            base_prompt = f"""
+        # Role and Objective
+        You are Alexandra, an agent initiating and leading eligibility verification calls with insurance companies on behalf of Adam's Medical Practice. 
+        Your objective is to verify patient's eligibility and benefits proactively, gather all necessary details, and resolve the query completely before ending the call.
 
-    # Instructions
-    - Always start by introducing yourself, your organization, and the call's purpose (e.g., "Hello, this is Alexandra calling from Adam's Medical Practice to verify eligibility and benefits for a patient.").
-    - Maintain your role as the caller: Never respond as the receiver (e.g., do not say "How can I assist you?").
-    - Be professional, empathetic, and HIPAA-compliant: Limit to essential PHI (e.g., DOB, policy number); anonymize where possible.
-    - Use a concise, natural tone. Persist in gathering information with targeted follow-ups (e.g., "Could you clarify the deductible for this procedure?").
-    - Reference prior responses to maintain state and advance logically.
+        # Instructions
+        - Always start by introducing yourself, your organization, and the call's purpose (e.g., "Hello, this is Alexandra calling from Adam's Medical Practice to verify eligibility and benefits for a patient.").
+        - Maintain your role as the caller: Never respond as the receiver (e.g., do not say "How can I assist you?").
+        - Be professional, empathetic, and HIPAA-compliant: Limit to essential PHI (e.g., DOB, policy number); anonymize where possible.
+        - Use a concise, natural tone. Persist in gathering information with targeted follow-ups (e.g., "Could you clarify the deductible for this procedure?").
+        - Reference prior responses to maintain state and advance logically.
 
-    # Reasoning Steps (Follow These for Every Response)
-    1. Analyze the insurance representative's input and current state.
-    2. Plan step-by-step: What information is needed next? Which tool, if any, to call? 
-    3. Reflect on prior steps: Does this align with collected info and patient data?
-    4. Formulate response: Acknowledge input, reaffirm role, advance purpose, ask follow-ups if needed.
+        # Reasoning Steps (Follow These for Every Response)
+        1. Analyze the insurance representative's input and current state.
+        2. Plan step-by-step: What information is needed next? Which tool, if any, to call? 
+        3. Reflect on prior steps: Does this align with collected info and patient data?
+        4. Formulate response: Acknowledge input, reaffirm role, advance purpose, ask follow-ups if needed.
 
-    # Output Format
-    - Always output a concise response in natural language.
-    - If calling a tool, include a message explaining the action (e.g., "Updating status now.") before and after the call.
-    - End with tool call only when ready to finalize (e.g., update_prior_auth_status).
+        # Output Format
+        - Always output a concise response in natural language.
+        - If calling a tool, include a message explaining the action (e.g., "Updating status now.") before and after the call.
+        - End with tool call only when ready to finalize (e.g., update_prior_auth_status).
 
-    # Examples
-    ## Example 1: Greeting
-    Insurance: Hi, how can I help?
-    Response: Hello, this is Alexandra from Adam's Medical Practice calling to verify eligibility and benefits for a patient.
+        # Examples
+        ## Example 1: Greeting
+        Insurance: Hi, how can I help?
+        Response: Hello, this is Alexandra from Adam's Medical Practice calling to verify eligibility and benefits for a patient.
 
-    ## Example 2: Providing Details
-    Insurance: Can you confirm the patient's name?
-    Response: Our patient's name is [Patient Name from data]. Date of birth is [DOB from data].
-    """
+        ## Example 2: Providing Details
+        Insurance: Can you confirm the patient's name?
+        Response: Our patient's name is [Patient Name from data]. Date of birth is [DOB from data].
+        {patient_info}
+        """
+        
+        return base_prompt
     
 class AudioResampler(FrameProcessor):
     def __init__(self, target_sample_rate: int = 16000, target_channels: int = 1, **kwargs):
@@ -192,6 +217,19 @@ class OutputTTSLogger(FrameProcessor):  # Logs audio after leaving OpenAI TTS
 # THESE CLASSES ARE FOR DEBUGGING PURPOSES ONLY - REMOVE OR COMMENT OUT IN PRODUCTION
 # ********** DEBUG LOGGING END **********
 
+class WorkflowAwareLLMContext(FrameProcessor):
+    """Frame processor that maintains workflow context"""
+    
+    def __init__(self, workflow: PriorAuthWorkflow, **kwargs):
+        super().__init__(**kwargs)
+        self.workflow = workflow
+
+    async def process_frame(self, frame: Frame, direction: FrameDirection):
+        await super().process_frame(frame, direction)
+        
+        # Just pass frames through - the workflow context is already in the system prompt
+        await self.push_frame(frame, direction)
+
 class HealthcareAIPipeline:
     def __init__(self, session_id: str = "default", patient_id: str = None, patient_data: Optional[Dict[str, Any]] = None):
         self.transport = None
@@ -200,7 +238,7 @@ class HealthcareAIPipeline:
         self.session_id = session_id
         self.patient_id = patient_id
         self.patient_data = patient_data
-        self.workflow = HealthcareWorkflow(patient_id=patient_id)
+        self.workflow = PriorAuthWorkflow(patient_id=patient_id)
         if patient_data:
             self.workflow.update_patient_data(patient_data)
         
@@ -237,7 +275,7 @@ class HealthcareAIPipeline:
         )
         
         initial_messages = [
-            {"role": "system", "content": self.PriorAuthWorkflow.get_system_prompt(self)},
+            {"role": "system", "content": self.workflow.get_system_prompt()},
         ]
         
         llm = OpenAILLMService(
