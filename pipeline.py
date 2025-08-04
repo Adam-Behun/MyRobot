@@ -8,6 +8,8 @@ from pipecat.processors.frame_processor import FrameProcessor
 from pipecat.services.deepgram.stt import DeepgramSTTService
 from pipecat.services.openai.llm import OpenAILLMService
 from pipecat.services.elevenlabs.tts import ElevenLabsTTSService
+from pipecat.frames.frames import TransportMessageFrame
+from pipecat.processors.transcript_processor import TranscriptProcessor
 from pipecat.transports.services.livekit import LiveKitTransport, LiveKitParams
 from pipecat.audio.utils import create_stream_resampler
 from pipecat.processors.frame_processor import FrameDirection
@@ -59,6 +61,10 @@ class PriorAuthWorkflow:
         - Facility: {self.patient_data.get('facility_name', 'N/A')}
         - Prior Auth Status: {self.patient_data.get('prior_auth_status', 'N/A')}
         - Appointment Time: {self.patient_data.get('appointment_time', 'N/A')}
+
+        **IMPORTANT FOR FUNCTION CALLS:**
+        - Patient ID for database updates: {self.patient_data.get('_id', 'N/A')}
+        - When calling update_prior_auth_status, use this exact patient_id: "{self.patient_data.get('_id', 'N/A')}"
         
         Full Patient Record (for reference):
         {str(self.patient_data)}
@@ -239,6 +245,8 @@ class HealthcareAIPipeline:
         self.patient_id = patient_id
         self.patient_data = patient_data
         self.workflow = PriorAuthWorkflow(patient_id=patient_id)
+        self.transcript_processor = TranscriptProcessor()
+        self.transcripts = []   
         if patient_data:
             self.workflow.update_patient_data(patient_data)
         
@@ -283,7 +291,25 @@ class HealthcareAIPipeline:
             model="gpt-4.1-nano-2025-04-14",
             tools=PATIENT_FUNCTIONS
         )
-        
+
+        @self.transcript_processor.event_handler("on_transcript_update")
+        async def handle_transcript_update(processor, frame):
+            for message in frame.messages:
+                transcript_entry = {
+                    "role": message.role,
+                    "content": message.content,
+                    "timestamp": message.timestamp or datetime.now().isoformat()
+                }
+                self.transcripts.append(transcript_entry)  # Optional
+                logger.info(f"Transcript: [{transcript_entry['timestamp']}] {transcript_entry['role']}: {transcript_entry['content']}")
+                
+                data = json.dumps(transcript_entry)
+                message_frame = TransportMessageFrame(
+                    message=data.encode('utf-8'),
+                    participant_id=None  # Broadcast to all
+                )
+                await self.transport.push_frame(message_frame)
+
         def create_handler(handler):
             async def wrapped(params: FunctionCallParams, **kwargs):
                 result = await handler(**kwargs)
@@ -292,7 +318,7 @@ class HealthcareAIPipeline:
         
         for name, handler in FUNCTION_REGISTRY.items():
             llm.register_function(name, create_handler(handler))
-        
+
         llm_context = OpenAILLMContext(messages=initial_messages)
         context_aggregators = llm.create_context_aggregator(llm_context)
         
@@ -310,7 +336,6 @@ class HealthcareAIPipeline:
                 enable_ssml_parsing=True  
             )
         )
-        
 
         # ********** DEBUG PIPELINE INTEGRATION **********
         self.pipeline = Pipeline([
@@ -320,6 +345,7 @@ class HealthcareAIPipeline:
             InputAudioLogger(),
             stt,
             OutputSTTLogger(),
+            self.transcript_processor.user(),  # Capture user transcripts
             context_aggregators.user(),
             InputLLMLogger(),
             WorkflowAwareLLMContext(self.workflow),
@@ -328,10 +354,10 @@ class HealthcareAIPipeline:
             InputTTSLogger(),
             tts,
             OutputTTSLogger(),
+            self.transcript_processor.assistant(),  # Capture assistant transcripts
             context_aggregators.assistant(),
             self.transport.output()
-        ])
-        
+        ])        
         logger.info("Healthcare pipeline created successfully with workflow integration")
         return self.pipeline
     

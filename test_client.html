@@ -3,17 +3,22 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Healthcare AI Agent - Test Client</title>
+    <title>Prior Authorization AI Agent - Test Client</title>
     <script src="https://unpkg.com/livekit-client@1.15.13/dist/livekit-client.umd.js"></script>
     <style>
-        body {
-            font-family: Arial, sans-serif;
-            max-width: 900px;
-            margin: 0 auto;
-            padding: 10px;
-            background-color: #f5f5f5;
+    body {
+        font-family: Arial, sans-serif;
+        max-width: 1400px;
+        margin: 0 auto;
+        padding: 10px;
+        background-color: #f5f5f5;
         }
-        .container {
+        .main-container {
+            display: flex;
+            gap: 20px;
+        }
+        .left-panel, .right-panel {
+            flex: 1;
             background: white;
             padding: 15px;
             border-radius: 10px;
@@ -72,10 +77,47 @@
             border: 1px solid #e9ecef;
             border-radius: 5px;
             padding: 10px;
-            height: 150px;
+            height: 400px;
             overflow-y: auto;
             font-family: monospace;
             font-size: 12px;
+        }
+        .transcript-container {
+            background-color: #f8f9fa;
+            border: 1px solid #e9ecef;
+            border-radius: 5px;
+            padding: 10px;
+            height: 400px;
+            overflow-y: auto;
+            font-family: Arial, sans-serif;
+            font-size: 14px;
+        }
+        .transcript-message {
+            margin: 8px 0;
+            padding: 8px;
+            border-radius: 8px;
+            max-width: 80%;
+        }
+        .transcript-message.user {
+            background-color: #e3f2fd;
+            border-left: 4px solid #2196f3;
+            margin-left: 0;
+        }
+        .transcript-message.assistant {
+            background-color: #f1f8e9;
+            border-left: 4px solid #4caf50;
+            margin-left: 20%;
+        }
+        .transcript-message .speaker {
+            font-weight: bold;
+            font-size: 12px;
+            color: #666;
+            margin-bottom: 4px;
+        }
+        .transcript-message .timestamp {
+            font-size: 11px;
+            color: #999;
+            margin-left: 8px;
         }
         input[type="text"] {
             width: 300px;
@@ -124,52 +166,92 @@
             font-size: 12px;
             color: #666;
         }
+        .session-details {
+            background-color: #f8f9fa;
+            border: 1px solid #e9ecef;
+            border-radius: 5px;
+            margin: 10px 0;
+        }
+        .session-details summary {
+            padding: 10px;
+            cursor: pointer;
+            font-weight: bold;
+            background-color: #e9ecef;
+            border-radius: 5px;
+        }
+        .session-details summary:hover {
+            background-color: #dee2e6;
+        }
+        .session-details-content {
+            padding: 10px;
+        }
     </style>
 </head>
 <body>
-    <div class="container">
-        <h1>Healthcare AI Agent - Test Client</h1>
-        
-        <div class="patient-controls">
-            <h3>Patient Selection</h3>
+    <div class="main-container">
+        <!-- Left Panel - Existing Controls -->
+        <div class="left-panel">
+            <h1>Prior Authorization AI Agent - Test Client</h1>
             
-            <div style="margin-bottom: 10px;">
-                <button onclick="loadPatients()" class="secondary">Load Available Patients</button>
-                <span id="patientCount"></span>
+            <div class="patient-controls">
+                <h3>Patient Selection</h3>
+                
+                <div style="margin-bottom: 10px;">
+                    <button onclick="loadPatients()" class="secondary">Load Available Patients</button>
+                    <span id="patientCount"></span>
+                </div>
+                
+                <div id="patientList" class="patient-list" style="display: none;"></div>
+                
+                <div id="patientInfo" style="display: none;"></div>
+            </div>
+
+            <div class="controls" id="callControls" style="display: none;">
+                <button id="startCallBtn" onclick="startCallForPatient()" disabled>Start Call for Patient</button>
+                <button id="connectBtn" onclick="connectToRoom()" disabled>Connect to Room</button>
+                <button id="disconnectBtn" onclick="disconnectFromRoom()" disabled>Disconnect</button>
+            </div>
+
+            <div class="audio-controls" id="audioControls" style="display: none;">
+                <label>
+                    <input type="checkbox" id="micMute" onchange="toggleMicrophone()"> Mute Microphone
+                </label>
+                <span id="audioStatus">Microphone: Not connected</span>
+            </div>
+
+            <div class="status disconnected" id="connectionStatus" style="display: none;">
+                Disconnected - Select a patient and click "Start Call for Patient"
+            </div>
+
+            <details class="session-details" id="sessionDetails" style="display: none;">
+                <summary>Session Details</summary>
+                <div class="session-details-content">
+                    <div>Session ID: <input type="text" id="sessionId" placeholder="Session ID will appear here..." readonly></div>
+                    <div>Room URL: <input type="text" id="roomUrl" placeholder="Room URL will appear here..." readonly></div>
+                    <div>User Token: <input type="text" id="userToken" placeholder="User token will appear here..." readonly></div>
+                </div>
+            </details>
+
+            <div id="eventLogSection" style="display: none;">
+                <h3>Event Log:</h3>
+                <div class="log" id="eventLog"></div>
+            </div>
+        </div>
+
+        <!-- Right Panel - Real-time Transcript -->
+        <div class="right-panel">
+            <h1 style="text-align: center;">Real-time Transcript</h1>
+            
+            <div class="transcript-container" id="transcriptContainer">
+                <div style="text-align: center; color: #666; margin-top: 50px;">
+                    Connect to a call to see real-time transcription
+                </div>
             </div>
             
-            <div id="patientList" class="patient-list" style="display: none;"></div>
-            
-            <div id="patientInfo" style="display: none;"></div>
-        </div>
-
-        <div class="controls">
-            <button id="startCallBtn" onclick="startCallForPatient()" disabled>Start Call for Patient</button>
-            <button id="connectBtn" onclick="connectToRoom()" disabled>Connect to Room</button>
-            <button id="disconnectBtn" onclick="disconnectFromRoom()" disabled>Disconnect</button>
-        </div>
-
-        <div class="audio-controls">
-            <label>
-                <input type="checkbox" id="micMute" onchange="toggleMicrophone()"> Mute Microphone
-            </label>
-            <span id="audioStatus">Microphone: Not connected</span>
-        </div>
-
-        <div class="status disconnected" id="connectionStatus">
-            Disconnected - Select a patient and click "Start Call for Patient"
-        </div>
-
-        <div>
-            <h3>Session Info:</h3>
-            <div>Session ID: <input type="text" id="sessionId" placeholder="Session ID will appear here..." readonly></div>
-            <div>Room URL: <input type="text" id="roomUrl" placeholder="Room URL will appear here..." readonly></div>
-            <div>User Token: <input type="text" id="userToken" placeholder="User token will appear here..." readonly></div>
-        </div>
-
-        <div>
-            <h3>Event Log:</h3>
-            <div class="log" id="eventLog"></div>
+            <div class="controls" style="margin-top: 10px;">
+                <button id="clearTranscriptBtn" onclick="clearTranscript()" class="secondary">Clear Transcript</button>
+                <span id="transcriptStatus">Transcript: Not connected</span>
+            </div>
         </div>
     </div>
 
@@ -186,7 +268,7 @@
             if (window.LivekitClient) {
                 window.LiveKitClient = window.LivekitClient;
                 console.log('✅ LiveKit client found and set up correctly');
-                log('LiveKit library loaded successfully');
+                log('LiveKit library loaded');
             } else {
                 console.error('❌ LiveKit client not found');
                 log('ERROR: LiveKit library failed to load');
@@ -195,8 +277,9 @@
 
         function log(message) {
             const logElement = document.getElementById('eventLog');
-            const timestamp = new Date().toLocaleTimeString();
-            logElement.innerHTML += `[${timestamp}] ${message}\n`;
+            const now = new Date();
+            const timestamp = now.toLocaleTimeString() + '.' + String(now.getMilliseconds()).padStart(3, '0');
+            logElement.innerHTML += `[${timestamp}] ${message}<br>`;
             logElement.scrollTop = logElement.scrollHeight;
         }
 
@@ -204,6 +287,55 @@
             const statusElement = document.getElementById('connectionStatus');
             statusElement.textContent = status;
             statusElement.className = `status ${className}`;
+        }
+
+        function addTranscriptMessage(speaker, message, isUser = false) {
+            const transcriptContainer = document.getElementById('transcriptContainer');
+            const timestamp = new Date().toLocaleTimeString();
+            
+            const messageDiv = document.createElement('div');
+            messageDiv.className = `transcript-message ${isUser ? 'user' : 'assistant'}`;
+            
+            messageDiv.innerHTML = `
+                <div class="speaker">${speaker}<span class="timestamp">${timestamp}</span></div>
+                <div>${message}</div>
+            `;
+            
+            transcriptContainer.appendChild(messageDiv);
+            transcriptContainer.scrollTop = transcriptContainer.scrollHeight;
+        }
+
+        function clearTranscript() {
+            const transcriptContainer = document.getElementById('transcriptContainer');
+            transcriptContainer.innerHTML = '<div style="text-align: center; color: #666; margin-top: 50px;">Transcript cleared</div>';
+            log('Transcript cleared');
+        }
+
+        function setupTranscriptListener() {
+            if (!room) return;
+            
+            // Listen for real-time data messages containing transcripts
+            room.on(LiveKitClient.RoomEvent.DataReceived, (data, participant) => {
+                try {
+                    const transcriptData = JSON.parse(new TextDecoder().decode(data));
+                    
+                    if (transcriptData.role && transcriptData.content) {
+                        const speaker = transcriptData.role === 'user' ? 'Insurance Agent' : 'Provider Agent';
+                        const isUser = transcriptData.role === 'user';
+                        addTranscriptMessage(speaker, transcriptData.content, isUser);
+                        log(`Transcript: ${speaker} - "${transcriptData.content.slice(0, 50)}..."`);
+                    }
+                } catch (error) {
+                    // Ignore non-transcript data messages
+                }
+            });
+            
+            document.getElementById('transcriptStatus').textContent = 'Transcript: Connected';
+            log('Real-time transcript listener active');
+        }
+
+        function cleanupTranscriptHandler() {
+            document.getElementById('transcriptStatus').textContent = 'Transcript: Not connected';
         }
 
         async function loadPatients() {
@@ -261,6 +393,19 @@
             if (patientData) {
                 showPatientInfo(patientData);
                 currentPatientData = patientData;
+                
+                // Hide patient selection elements after selection
+                document.getElementById('patientList').style.display = 'none';
+                document.querySelector('button[onclick="loadPatients()"]').style.display = 'none';
+                document.getElementById('patientCount').style.display = 'none';
+                
+                // Show all hidden elements after patient selection
+                document.getElementById('callControls').style.display = 'block';
+                document.getElementById('audioControls').style.display = 'flex';
+                document.getElementById('connectionStatus').style.display = 'block';
+                document.getElementById('sessionDetails').style.display = 'block';
+                document.getElementById('eventLogSection').style.display = 'block';
+                
                 document.getElementById('startCallBtn').disabled = false;
                 log(`Selected patient: ${patientData.patient_name} (${patientId})`);
             }
@@ -313,13 +458,13 @@
                 document.getElementById('userToken').value = sessionData.user_token;
                 document.getElementById('connectBtn').disabled = false;
                 
-                log(`✅ Session created: ${sessionData.session_id}`);
-                log(`📞 Call started for: ${sessionData.patient_name} at ${sessionData.facility_name}`);
-                log(`🏥 Room: ${sessionData.room_name}`);
+                log(`Session created: ${sessionData.session_id}`);
+                log(`Call started for: ${sessionData.patient_name} at ${sessionData.facility_name}`);
+                log(`Room: ${sessionData.room_name}`);
                 updateStatus(`Session ready for ${sessionData.patient_name} - Click "Connect to Room"`, 'connecting');
                 
             } catch (error) {
-                log(`❌ Error starting call: ${error.message}`);
+                log(`Error starting call: ${error.message}`);
                 updateStatus('Error starting call', 'disconnected');
             }
         }
@@ -351,15 +496,13 @@
                     }
                     const average = sum / bufferLength;
                     
-                    if (average > 20) {
-                        log(`🎤 Speaking detected (level: ${Math.round(average)})`);
-                    }
+                    // Remove speech detection logging - not relevant
                     
                     requestAnimationFrame(checkAudioLevel);
                 }
                 
                 checkAudioLevel();
-                log('Audio level monitoring started successfully');
+                log('Audio level monitoring started');
                 
                 window.audioMonitorCleanup = () => {
                     isMonitoring = false;
@@ -398,6 +541,9 @@
                 room.on(LiveKitClient.RoomEvent.Connected, () => {
                     log('Connected to room');
                     updateStatus('Connected - Waiting for AI agent', 'connected');
+                    
+                    // Setup real-time transcript listener
+                    setupTranscriptListener();
                 });
 
                 room.on(LiveKitClient.RoomEvent.Disconnected, () => {
@@ -405,12 +551,15 @@
                     updateStatus('Disconnected', 'disconnected');
                     document.getElementById('connectBtn').disabled = false;
                     document.getElementById('disconnectBtn').disabled = true;
+                    
+                    // Cleanup transcript handler
+                    cleanupTranscriptHandler();
                 });
 
                 room.on(LiveKitClient.RoomEvent.ParticipantConnected, (participant) => {
                     log(`Participant connected: ${participant.identity}`);
                     if (participant.identity === 'healthcare-bot') {
-                        updateStatus(`🤖 MyRobot connected.`);
+                        updateStatus(`AI agent connected`);
                     }
                 });
 
@@ -418,7 +567,7 @@
                     log(`Track subscribed from ${participant.identity}: ${track.kind}`);
                     
                     if (track.kind === LiveKitClient.Track.Kind.Audio && participant.identity === 'healthcare-bot') {
-                        log('🔊 AI agent audio track received - you should hear MyRobot respond');
+                        log('AI agent audio track received');
                         
                         const audioElement = track.attach();
                         audioElement.autoplay = true;
@@ -443,7 +592,7 @@
                         source: LiveKitClient.Track.Source.Microphone,
                     });
                     
-                    log('🎤 Microphone enabled and published');
+                    log('Microphone enabled and published');
                     document.getElementById('audioStatus').textContent = 'Microphone: Active';
                     
                     if (localAudioTrack.mediaStreamTrack) {
@@ -451,7 +600,7 @@
                     }
                     
                 } catch (error) {
-                    log(`❌ Error enabling microphone: ${error.message}`);
+                    log(`Error enabling microphone: ${error.message}`);
                     document.getElementById('audioStatus').textContent = 'Microphone: Error';
                 }
 
@@ -459,7 +608,7 @@
                 document.getElementById('disconnectBtn').disabled = false;
 
             } catch (error) {
-                log(`❌ Error connecting to room: ${error.message}`);
+                log(`Error connecting to room: ${error.message}`);
                 updateStatus('Connection failed', 'disconnected');
             }
         }
@@ -469,6 +618,9 @@
                 window.audioMonitorCleanup();
                 window.audioMonitorCleanup = null;
             }
+            
+            // Cleanup transcript handler
+            cleanupTranscriptHandler();
             
             if (room) {
                 await room.disconnect();
@@ -500,8 +652,31 @@
             }
         }
 
+        function setupTranscriptListener() {
+            if (!room) return;
+            
+            // Listen for real-time data messages containing transcripts
+            room.on(LiveKitClient.RoomEvent.DataReceived, (data, participant) => {
+                try {
+                    const transcriptData = JSON.parse(new TextDecoder().decode(data));
+                    
+                    if (transcriptData.role && transcriptData.content) {
+                        const speaker = transcriptData.role === 'user' ? 'Insurance Agent' : 'Provider Agent';
+                        const isUser = transcriptData.role === 'user';
+                        addTranscriptMessage(speaker, transcriptData.content, isUser);
+                        log(`Transcript: ${speaker} - "${transcriptData.content.slice(0, 50)}..."`);
+                    }
+                } catch (error) {
+                    // Ignore non-transcript data messages
+                }
+            });
+            
+            document.getElementById('transcriptStatus').textContent = 'Transcript: Connected';
+            log('Real-time transcript listener active');
+        }
+
         // Initialize
-        log('Healthcare AI Test Client loaded - Select a patient to start');
+        log('Prior Authorization AI Test Client loaded - Select a patient to start');
     </script>
 </body>
 </html>

@@ -22,20 +22,32 @@ async def update_prior_auth_status(patient_id: str, status: str) -> bool:
     start_time = time.time()
     
     try:
+        logger.info(f"Attempting to update patient {patient_id} to status '{status}'")
+        
+        # Verify patient exists first
+        patient = await patient_db.find_patient_by_id(patient_id)
+        if not patient:
+            logger.error(f"Patient not found: {patient_id}")
+            return False
+            
         success = await patient_db.update_prior_auth_status(patient_id, status)
         
         latency = (time.time() - start_time) * 1000
         logger.info(f"Prior auth update latency: {latency:.2f}ms")
         
         if success:
-            logger.info(f"Updated prior auth status to '{status}' for patient ID: {patient_id}")
+            logger.info(f"Successfully updated prior auth status to '{status}' for patient ID: {patient_id}")
+            
+            # Verify the update
+            updated_patient = await patient_db.find_patient_by_id(patient_id)
+            logger.info(f"Verification - new status: {updated_patient.get('prior_auth_status', 'ERROR')}")
         else:
-            logger.warning(f"Failed to update prior auth status for patient ID: {patient_id}")
+            logger.error(f"Failed to update prior auth status for patient ID: {patient_id}")
             
         return success
         
     except Exception as e:
-        logger.error(f"Error updating prior auth status for patient {patient_id}: {e}")
+        logger.error(f"Exception updating prior auth status for patient {patient_id}: {e}")
         return False
 
 # Function definitions for LLM function calling
