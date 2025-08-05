@@ -119,6 +119,10 @@
             color: #999;
             margin-left: 8px;
         }
+        .transcript-message.interim {
+            color: #808080;
+            font-style: italic;
+        }
         input[type="text"] {
             width: 300px;
             padding: 8px;
@@ -289,15 +293,15 @@
             statusElement.className = `status ${className}`;
         }
 
-        function addTranscriptMessage(speaker, message, isUser = false) {
+        function addTranscriptMessage(speaker, message, isUser = false, timestamp = null, isFinal = true) {
             const transcriptContainer = document.getElementById('transcriptContainer');
-            const timestamp = new Date().toLocaleTimeString();
+            const displayTimestamp = timestamp ? new Date(timestamp).toLocaleTimeString() : new Date().toLocaleTimeString();
             
             const messageDiv = document.createElement('div');
-            messageDiv.className = `transcript-message ${isUser ? 'user' : 'assistant'}`;
+            messageDiv.className = `transcript-message ${isUser ? 'user' : 'assistant'} ${isFinal ? '' : 'interim'}`;
             
             messageDiv.innerHTML = `
-                <div class="speaker">${speaker}<span class="timestamp">${timestamp}</span></div>
+                <div class="speaker">${speaker}<span class="timestamp">${displayTimestamp}</span></div>
                 <div>${message}</div>
             `;
             
@@ -314,24 +318,50 @@
         function setupTranscriptListener() {
             if (!room) return;
             
-            // Listen for real-time data messages containing transcripts
+            console.log('🔍 DEBUG: Setting up transcript listener');
+            
+            // Listen for real-time data messages containing RTVI events
             room.on(LiveKitClient.RoomEvent.DataReceived, (data, participant) => {
+                console.log('🔍 DEBUG: Data received from participant:', participant?.identity);
+                console.log('🔍 DEBUG: Raw data length:', data.length);
+                
                 try {
-                    const transcriptData = JSON.parse(new TextDecoder().decode(data));
+                    const decoded = new TextDecoder().decode(data);
+                    console.log('🔍 DEBUG: Decoded data:', decoded);
                     
-                    if (transcriptData.role && transcriptData.content) {
-                        const speaker = transcriptData.role === 'user' ? 'Insurance Agent' : 'Provider Agent';
-                        const isUser = transcriptData.role === 'user';
-                        addTranscriptMessage(speaker, transcriptData.content, isUser);
-                        log(`Transcript: ${speaker} - "${transcriptData.content.slice(0, 50)}..."`);
+                    const parsed = JSON.parse(decoded);
+                    console.log('🔍 DEBUG: Parsed data:', parsed);
+                    
+                    if (parsed.label === 'rtvi-ai') {
+                        if (parsed.type === 'user-transcription') {
+                            const { text, final, timestamp } = parsed.data;
+                            addTranscriptMessage('Insurance Agent', text, true, timestamp, final);
+                            log(`📝 User Transcript: "${text.slice(0, 50)}..." (final: ${final})`);
+                            console.log('✅ DEBUG: Successfully added user transcript');
+                        } else if (parsed.type === 'bot-transcription') {
+                            const { text } = parsed.data;
+                            addTranscriptMessage('Provider Agent', text, false);
+                            log(`📝 Bot Transcript: "${text.slice(0, 50)}..."`);
+                            console.log('✅ DEBUG: Successfully added bot transcript');
+                        } else if (parsed.type === 'bot-ready') {
+                            log('✅ Bot ready');
+                            updateStatus('AI agent ready - Conversation active', 'connected');
+                            console.log('✅ DEBUG: Bot ready event received');
+                        } else {
+                            console.log('⚠️ DEBUG: Ignored RTVI message type:', parsed.type);
+                        }
+                    } else {
+                        console.log('⚠️ DEBUG: Ignored non-RTVI message');
                     }
                 } catch (error) {
-                    // Ignore non-transcript data messages
+                    console.log('⚠️ DEBUG: Error parsing data (might not be RTVI):', error.message);
+                    console.log('⚠️ DEBUG: Raw data as string:', new TextDecoder().decode(data));
                 }
             });
             
             document.getElementById('transcriptStatus').textContent = 'Transcript: Connected';
-            log('Real-time transcript listener active');
+            log('📝 Real-time transcript listener active');
+            console.log('✅ DEBUG: Transcript listener setup complete');
         }
 
         function cleanupTranscriptHandler() {
@@ -602,6 +632,17 @@
                 } catch (error) {
                     log(`Error enabling microphone: ${error.message}`);
                     document.getElementById('audioStatus').textContent = 'Microphone: Error';
+                }
+
+                try {
+                    const readyMessage = JSON.stringify({
+                        label: 'rtvi-ai',
+                        type: 'client-ready'
+                    });
+                    await room.localParticipant.publishData(new TextEncoder().encode(readyMessage));
+                    log('Sent client-ready message');
+                } catch (error) {
+                    log(`Error sending client-ready: ${error.message}`);
                 }
 
                 document.getElementById('connectBtn').disabled = true;

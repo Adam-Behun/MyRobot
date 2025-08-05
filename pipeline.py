@@ -5,6 +5,7 @@ from pipecat.pipeline.task import PipelineTask, PipelineParams
 from pipecat.audio.vad.silero import SileroVADAnalyzer
 from pipecat.audio.vad.vad_analyzer import VADParams
 from pipecat.processors.frame_processor import FrameProcessor
+from pipecat.processors.frameworks.rtvi import RTVIProcessor, RTVIObserver, RTVIConfig
 from pipecat.services.deepgram.stt import DeepgramSTTService
 from pipecat.services.openai.llm import OpenAILLMService
 from pipecat.services.elevenlabs.tts import ElevenLabsTTSService
@@ -23,7 +24,10 @@ from deepgram import LiveOptions
 
 import os
 import sys
+import json
 import logging
+from logging.handlers import RotatingFileHandler
+import traceback
 from typing import Dict, Any, Optional
 from dotenv import load_dotenv
 from datetime import datetime
@@ -32,7 +36,15 @@ import audioop
 
 load_dotenv()
 
-logging.basicConfig(level=logging.DEBUG)
+root_logger = logging.getLogger()
+root_logger.setLevel(logging.DEBUG)
+
+# Add file handler
+file_handler = logging.FileHandler('pipeline.log', mode='a')
+file_handler.setLevel(logging.DEBUG)
+file_handler.setFormatter(logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s'))
+root_logger.addHandler(file_handler)
+
 logger = logging.getLogger(__name__)
 
 class PriorAuthWorkflow:
@@ -159,70 +171,6 @@ class CustomPipelineRunner(PipelineRunner):
             return
         super()._setup_sigint()
 
-# ********** DEBUG LOGGING START **********
-# THESE CLASSES ARE FOR DEBUGGING PURPOSES ONLY - REMOVE OR COMMENT OUT IN PRODUCTION
-# THEY LOG FRAME DETAILS AT KEY PIPELINE STAGES TO HELP IDENTIFY FAILURES
-# ********** DEBUG LOGGING START **********
-
-class InputAudioLogger(FrameProcessor):  # Logs audio before reaching Deepgram STT
-    async def process_frame(self, frame: Frame, direction: FrameDirection):
-        await super().process_frame(frame, direction)
-        if isinstance(frame, AudioRawFrame):
-            logger.debug(f"[{datetime.now().isoformat()}] SUCCESS: Audio input before Deepgram - {len(frame.audio)} bytes, sample_rate={frame.sample_rate}")
-        else:
-            logger.warning(f"[{datetime.now().isoformat()}] WARNING: Unexpected frame before Deepgram - {type(frame).__name__}")
-        await self.push_frame(frame, direction)
-
-class OutputSTTLogger(FrameProcessor):  # Logs text after leaving Deepgram STT
-    async def process_frame(self, frame: Frame, direction: FrameDirection):
-        await super().process_frame(frame, direction)
-        if isinstance(frame, TextFrame) and frame.text:
-            logger.debug(f"[{datetime.now().isoformat()}] SUCCESS: Transcribed text after Deepgram - '{frame.text[:100]}...'")
-        else:
-            logger.error(f"[{datetime.now().isoformat()}] ERROR: No valid text output after Deepgram - {type(frame).__name__}")
-        await self.push_frame(frame, direction)
-
-class InputLLMLogger(FrameProcessor):  # Logs messages before reaching OpenAI LLM
-    async def process_frame(self, frame: Frame, direction: FrameDirection):
-        await super().process_frame(frame, direction)
-        if isinstance(frame, LLMMessagesFrame) and frame.messages:
-            last_msg = frame.messages[-1].get('content', '')[:100]
-            logger.debug(f"[{datetime.now().isoformat()}] SUCCESS: Messages before LLM - Last content: '{last_msg}...'")
-        else:
-            logger.warning(f"[{datetime.now().isoformat()}] WARNING: Invalid input before LLM - {type(frame).__name__}")
-        await self.push_frame(frame, direction)
-
-class OutputLLMLogger(FrameProcessor):  # Logs text after leaving OpenAI LLM
-    async def process_frame(self, frame: Frame, direction: FrameDirection):
-        await super().process_frame(frame, direction)
-        if isinstance(frame, TextFrame) and frame.text:
-            logger.debug(f"[{datetime.now().isoformat()}] SUCCESS: Response text after LLM - '{frame.text[:100]}...'")
-        else:
-            logger.error(f"[{datetime.now().isoformat()}] ERROR: No text output after LLM - {type(frame).__name__}")
-        await self.push_frame(frame, direction)
-
-class InputTTSLogger(FrameProcessor):  # Logs text before reaching OpenAI TTS
-    async def process_frame(self, frame: Frame, direction: FrameDirection):
-        await super().process_frame(frame, direction)
-        if isinstance(frame, TextFrame) and frame.text:
-            logger.debug(f"[{datetime.now().isoformat()}] SUCCESS: Text input before TTS - '{frame.text[:100]}...'")
-        else:
-            logger.warning(f"[{datetime.now().isoformat()}] WARNING: Invalid input before TTS - {type(frame).__name__}")
-        await self.push_frame(frame, direction)
-
-class OutputTTSLogger(FrameProcessor):  # Logs audio after leaving OpenAI TTS
-    async def process_frame(self, frame: Frame, direction: FrameDirection):
-        await super().process_frame(frame, direction)
-        if isinstance(frame, TTSAudioRawFrame) and frame.audio:
-            logger.debug(f"[{datetime.now().isoformat()}] SUCCESS: Audio output after TTS - {len(frame.audio)} bytes, sample_rate={frame.sample_rate}")
-        else:
-            logger.error(f"[{datetime.now().isoformat()}] ERROR: No audio output after TTS - {type(frame).__name__}")
-        await self.push_frame(frame, direction)
-
-# ********** DEBUG LOGGING END **********
-# THESE CLASSES ARE FOR DEBUGGING PURPOSES ONLY - REMOVE OR COMMENT OUT IN PRODUCTION
-# ********** DEBUG LOGGING END **********
-
 class WorkflowAwareLLMContext(FrameProcessor):
     """Frame processor that maintains workflow context"""
     
@@ -247,6 +195,8 @@ class HealthcareAIPipeline:
         self.workflow = PriorAuthWorkflow(patient_id=patient_id)
         self.transcript_processor = TranscriptProcessor()
         self.transcripts = []   
+        self.rtvi = None  # Initialize RTVIProcessor reference
+        self.task = None  # Initialize PipelineTask reference
         if patient_data:
             self.workflow.update_patient_data(patient_data)
         
@@ -263,7 +213,10 @@ class HealthcareAIPipeline:
         
         self.transport = LiveKitTransport(url, token, room_name, params=params)
         
-        # https://developers.deepgram.com/reference/speech-to-text-api/listen-streaming
+        # RTVI integration
+        rtvi = RTVIProcessor(config=RTVIConfig(config=[]))
+        self.rtvi = rtvi
+        
         stt = DeepgramSTTService(
             api_key=os.getenv("DEEPGRAM_API_KEY"),
             live_options=LiveOptions(
@@ -291,25 +244,7 @@ class HealthcareAIPipeline:
             model="gpt-4.1-nano-2025-04-14",
             tools=PATIENT_FUNCTIONS
         )
-
-        @self.transcript_processor.event_handler("on_transcript_update")
-        async def handle_transcript_update(processor, frame):
-            for message in frame.messages:
-                transcript_entry = {
-                    "role": message.role,
-                    "content": message.content,
-                    "timestamp": message.timestamp or datetime.now().isoformat()
-                }
-                self.transcripts.append(transcript_entry)  # Optional
-                logger.info(f"Transcript: [{transcript_entry['timestamp']}] {transcript_entry['role']}: {transcript_entry['content']}")
-                
-                data = json.dumps(transcript_entry)
-                message_frame = TransportMessageFrame(
-                    message=data.encode('utf-8'),
-                    participant_id=None  # Broadcast to all
-                )
-                await self.transport.push_frame(message_frame)
-
+        
         def create_handler(handler):
             async def wrapped(params: FunctionCallParams, **kwargs):
                 result = await handler(**kwargs)
@@ -318,7 +253,7 @@ class HealthcareAIPipeline:
         
         for name, handler in FUNCTION_REGISTRY.items():
             llm.register_function(name, create_handler(handler))
-
+        
         llm_context = OpenAILLMContext(messages=initial_messages)
         context_aggregators = llm.create_context_aggregator(llm_context)
         
@@ -336,29 +271,30 @@ class HealthcareAIPipeline:
                 enable_ssml_parsing=True  
             )
         )
-
-        # ********** DEBUG PIPELINE INTEGRATION **********
+        
+        # Pipeline with RTVI integration (remove TranscriptProcessor)
         self.pipeline = Pipeline([
             self.transport.input(),
+            rtvi,
             AudioResampler(),
             DropEmptyAudio(),
-            InputAudioLogger(),
             stt,
-            OutputSTTLogger(),
-            self.transcript_processor.user(),  # Capture user transcripts
             context_aggregators.user(),
-            InputLLMLogger(),
             WorkflowAwareLLMContext(self.workflow),
             llm,
-            OutputLLMLogger(),
-            InputTTSLogger(),
             tts,
-            OutputTTSLogger(),
-            self.transcript_processor.assistant(),  # Capture assistant transcripts
             context_aggregators.assistant(),
             self.transport.output()
         ])        
-        logger.info("Healthcare pipeline created successfully with workflow integration")
+        
+        # Add RTVI event handler for client readiness (to signal bot ready and initiate conversation if needed)
+        @rtvi.event_handler("on_client_ready")
+        async def on_client_ready(rtvi):
+            await rtvi.set_bot_ready()
+            # Queue initial context to start bot response if bot should speak first
+            await self.task.queue_frames([context_aggregators.user().get_context_frame()])
+        
+        logger.info("Healthcare pipeline created successfully with RTVI integration")
         return self.pipeline
     
     async def run(self, url: str, token: str, room_name: str):
@@ -371,8 +307,11 @@ class HealthcareAIPipeline:
                 allow_interruptions=True,
                 enable_metrics=True,
             ),
+            observers=[RTVIObserver(self.rtvi)],
             conversation_id=self.session_id
         )
+        
+        self.task = task  # Store the task instance for access in event handlers
         
         self.runner = CustomPipelineRunner()
         
