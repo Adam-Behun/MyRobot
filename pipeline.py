@@ -10,6 +10,19 @@ from pipecat.services.openai.llm import OpenAILLMService
 from pipecat.services.elevenlabs.tts import ElevenLabsTTSService
 from pipecat.frames.frames import TransportMessageFrame
 from pipecat.processors.transcript_processor import TranscriptProcessor
+
+# SAFE RTVI IMPORTS
+try:
+    from pipecat.processors.frameworks.rtvi import RTVIProcessor, RTVIConfig, RTVIObserver
+    RTVI_AVAILABLE = True
+    print("✅ RTVI imports successful")
+except ImportError as e:
+    print(f"❌ RTVI import failed: {e}")
+    RTVIProcessor = None
+    RTVIObserver = None
+    RTVIConfig = None
+    RTVI_AVAILABLE = False
+
 from pipecat.transports.services.livekit import LiveKitTransport, LiveKitParams
 from pipecat.audio.utils import create_stream_resampler
 from pipecat.processors.frame_processor import FrameDirection
@@ -162,11 +175,7 @@ class CustomPipelineRunner(PipelineRunner):
         super()._setup_sigint()
 
 # ********** DEBUG LOGGING START **********
-# THESE CLASSES ARE FOR DEBUGGING PURPOSES ONLY - REMOVE OR COMMENT OUT IN PRODUCTION
-# THEY LOG FRAME DETAILS AT KEY PIPELINE STAGES TO HELP IDENTIFY FAILURES
-# ********** DEBUG LOGGING START **********
-
-class InputAudioLogger(FrameProcessor):  # Logs audio before reaching Deepgram STT
+class InputAudioLogger(FrameProcessor):
     async def process_frame(self, frame: Frame, direction: FrameDirection):
         await super().process_frame(frame, direction)
         if isinstance(frame, AudioRawFrame):
@@ -175,7 +184,7 @@ class InputAudioLogger(FrameProcessor):  # Logs audio before reaching Deepgram S
             logger.warning(f"[{datetime.now().isoformat()}] WARNING: Unexpected frame before Deepgram - {type(frame).__name__}")
         await self.push_frame(frame, direction)
 
-class OutputSTTLogger(FrameProcessor):  # Logs text after leaving Deepgram STT
+class OutputSTTLogger(FrameProcessor):
     async def process_frame(self, frame: Frame, direction: FrameDirection):
         await super().process_frame(frame, direction)
         if isinstance(frame, TextFrame) and frame.text:
@@ -184,7 +193,7 @@ class OutputSTTLogger(FrameProcessor):  # Logs text after leaving Deepgram STT
             logger.error(f"[{datetime.now().isoformat()}] ERROR: No valid text output after Deepgram - {type(frame).__name__}")
         await self.push_frame(frame, direction)
 
-class InputLLMLogger(FrameProcessor):  # Logs messages before reaching OpenAI LLM
+class InputLLMLogger(FrameProcessor):
     async def process_frame(self, frame: Frame, direction: FrameDirection):
         await super().process_frame(frame, direction)
         if isinstance(frame, LLMMessagesFrame) and frame.messages:
@@ -194,7 +203,7 @@ class InputLLMLogger(FrameProcessor):  # Logs messages before reaching OpenAI LL
             logger.warning(f"[{datetime.now().isoformat()}] WARNING: Invalid input before LLM - {type(frame).__name__}")
         await self.push_frame(frame, direction)
 
-class OutputLLMLogger(FrameProcessor):  # Logs text after leaving OpenAI LLM
+class OutputLLMLogger(FrameProcessor):
     async def process_frame(self, frame: Frame, direction: FrameDirection):
         await super().process_frame(frame, direction)
         if isinstance(frame, TextFrame) and frame.text:
@@ -203,7 +212,7 @@ class OutputLLMLogger(FrameProcessor):  # Logs text after leaving OpenAI LLM
             logger.error(f"[{datetime.now().isoformat()}] ERROR: No text output after LLM - {type(frame).__name__}")
         await self.push_frame(frame, direction)
 
-class InputTTSLogger(FrameProcessor):  # Logs text before reaching OpenAI TTS
+class InputTTSLogger(FrameProcessor):
     async def process_frame(self, frame: Frame, direction: FrameDirection):
         await super().process_frame(frame, direction)
         if isinstance(frame, TextFrame) and frame.text:
@@ -212,7 +221,7 @@ class InputTTSLogger(FrameProcessor):  # Logs text before reaching OpenAI TTS
             logger.warning(f"[{datetime.now().isoformat()}] WARNING: Invalid input before TTS - {type(frame).__name__}")
         await self.push_frame(frame, direction)
 
-class OutputTTSLogger(FrameProcessor):  # Logs audio after leaving OpenAI TTS
+class OutputTTSLogger(FrameProcessor):
     async def process_frame(self, frame: Frame, direction: FrameDirection):
         await super().process_frame(frame, direction)
         if isinstance(frame, TTSAudioRawFrame) and frame.audio:
@@ -220,9 +229,6 @@ class OutputTTSLogger(FrameProcessor):  # Logs audio after leaving OpenAI TTS
         else:
             logger.error(f"[{datetime.now().isoformat()}] ERROR: No audio output after TTS - {type(frame).__name__}")
         await self.push_frame(frame, direction)
-
-# ********** DEBUG LOGGING END **********
-# THESE CLASSES ARE FOR DEBUGGING PURPOSES ONLY - REMOVE OR COMMENT OUT IN PRODUCTION
 # ********** DEBUG LOGGING END **********
 
 class WorkflowAwareLLMContext(FrameProcessor):
@@ -234,8 +240,6 @@ class WorkflowAwareLLMContext(FrameProcessor):
 
     async def process_frame(self, frame: Frame, direction: FrameDirection):
         await super().process_frame(frame, direction)
-        
-        # Just pass frames through - the workflow context is already in the system prompt
         await self.push_frame(frame, direction)
 
 class HealthcareAIPipeline:
@@ -247,10 +251,23 @@ class HealthcareAIPipeline:
         self.patient_id = patient_id
         self.patient_data = patient_data
         self.workflow = PriorAuthWorkflow(patient_id=patient_id)
-        self.transcript_processor = TranscriptProcessor()
         self.transcripts = []   
         if patient_data:
             self.workflow.update_patient_data(patient_data)
+        
+        # SAFE RTVI INITIALIZATION
+        self.rtvi = None
+        if RTVI_AVAILABLE:
+            try:
+                self.rtvi = RTVIProcessor(config=RTVIConfig(config=[]))
+                logger.info("✅ RTVIProcessor created successfully")
+            except Exception as e:
+                logger.error(f"❌ RTVIProcessor creation failed: {e}")
+                self.rtvi = None
+        else:
+            logger.info("🔄 RTVI not available, using existing transcript system")
+        
+        self.transcript_processor = TranscriptProcessor()
         
     def create_pipeline(self, url: str, token: str, room_name: str) -> Pipeline:
         logger.info(f"Creating healthcare pipeline for room: {room_name}")
@@ -265,7 +282,6 @@ class HealthcareAIPipeline:
         
         self.transport = LiveKitTransport(url, token, room_name, params=params)
         
-        # https://developers.deepgram.com/reference/speech-to-text-api/listen-streaming
         stt = DeepgramSTTService(
             api_key=os.getenv("DEEPGRAM_API_KEY"),
             live_options=LiveOptions(
@@ -310,7 +326,6 @@ class HealthcareAIPipeline:
                 logger.info(f"📝 Transcript: [{transcript_entry['timestamp']}] {transcript_entry['role']}: {transcript_entry['content']}")
                 
                 try:
-                    # Push to LiveKit as data message for immediate frontend delivery
                     data = json.dumps(transcript_entry)
                     logger.info(f"🔍 DEBUG: Serialized transcript data: {data}")
                     
@@ -319,7 +334,6 @@ class HealthcareAIPipeline:
                     )
                     logger.info(f"🔍 DEBUG: Created TransportMessageFrame with {len(data.encode('utf-8'))} bytes")
                     
-                    # Push the frame through the pipeline to reach the transport
                     await self.pipeline.push_frame(message_frame)
                     logger.info(f"✅ DEBUG: Successfully pushed frame to pipeline")
                     
@@ -354,15 +368,25 @@ class HealthcareAIPipeline:
             )
         )
 
-        # ********** DEBUG PIPELINE INTEGRATION **********
-        self.pipeline = Pipeline([
+        # BUILD PIPELINE COMPONENTS SAFELY
+        pipeline_components = [
             self.transport.input(),
+        ]
+        
+        # Only add RTVI if it was created successfully
+        if self.rtvi is not None:
+            pipeline_components.append(self.rtvi)
+            logger.info("✅ Added RTVIProcessor to pipeline")
+        else:
+            logger.info("🔄 Skipping RTVIProcessor (not available)")
+        
+        pipeline_components.extend([
             AudioResampler(),
             DropEmptyAudio(),
             InputAudioLogger(),
             stt,
             OutputSTTLogger(),
-            self.transcript_processor.user(),  # Capture user transcripts
+            self.transcript_processor.user(),
             context_aggregators.user(),
             InputLLMLogger(),
             WorkflowAwareLLMContext(self.workflow),
@@ -371,10 +395,12 @@ class HealthcareAIPipeline:
             InputTTSLogger(),
             tts,
             OutputTTSLogger(),
-            self.transcript_processor.assistant(),  # Capture assistant transcripts
+            self.transcript_processor.assistant(),
             context_aggregators.assistant(),
             self.transport.output()
-        ])        
+        ])
+        
+        self.pipeline = Pipeline(pipeline_components)
         logger.info("Healthcare pipeline created successfully with workflow integration")
         return self.pipeline
     
@@ -382,12 +408,24 @@ class HealthcareAIPipeline:
         if not self.pipeline:
             self.create_pipeline(url, token, room_name)
         
+        # CONDITIONALLY add RTVIObserver
+        observers = []
+        if self.rtvi is not None and RTVI_AVAILABLE:
+            try:
+                observers.append(RTVIObserver(self.rtvi))
+                logger.info("✅ Added RTVIObserver to task")
+            except Exception as e:
+                logger.error(f"❌ RTVIObserver creation failed: {e}")
+        else:
+            logger.info("🔄 Skipping RTVIObserver (RTVI not available)")
+        
         task = PipelineTask(
             self.pipeline,
             params=PipelineParams(
                 allow_interruptions=True,
                 enable_metrics=True,
             ),
+            observers=observers,  # Will be empty list if RTVI failed
             conversation_id=self.session_id
         )
         
@@ -400,3 +438,12 @@ class HealthcareAIPipeline:
         except Exception as e:
             logger.error(f"Pipeline error: {e}")
             raise
+
+    def get_conversation_state(self):
+        """Get current conversation state"""
+        return {
+            "workflow_state": "active",
+            "workflow_context": {},
+            "patient_data": self.patient_data,
+            "collected_info": {}
+        }
