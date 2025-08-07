@@ -11,7 +11,7 @@ from pipecat.services.elevenlabs.tts import ElevenLabsTTSService
 from pipecat.frames.frames import TransportMessageFrame
 from pipecat.processors.transcript_processor import TranscriptProcessor
 
-# SAFE RTVI IMPORTS
+# SAFE RTVI IMPORTS - BUT NOT USING YET
 try:
     from pipecat.processors.frameworks.rtvi import RTVIProcessor, RTVIConfig, RTVIObserver
     RTVI_AVAILABLE = True
@@ -229,6 +229,18 @@ class OutputTTSLogger(FrameProcessor):
         else:
             logger.error(f"[{datetime.now().isoformat()}] ERROR: No audio output after TTS - {type(frame).__name__}")
         await self.push_frame(frame, direction)
+
+# NEW: Debug what's going to the transport
+class TransportDebugLogger(FrameProcessor):
+    async def process_frame(self, frame: Frame, direction: FrameDirection):
+        await super().process_frame(frame, direction)
+        if isinstance(frame, TransportMessageFrame):
+            logger.info(f"🔍 TRANSPORT DEBUG: Frame type={type(frame).__name__}, message type={type(frame.message)}")
+            if hasattr(frame.message, 'encode'):
+                logger.info(f"🔍 TRANSPORT DEBUG: Message has encode method, type={type(frame.message)}")
+            else:
+                logger.error(f"❌ TRANSPORT DEBUG: Message does NOT have encode method! Type={type(frame.message)}, Value={frame.message}")
+        await self.push_frame(frame, direction)
 # ********** DEBUG LOGGING END **********
 
 class WorkflowAwareLLMContext(FrameProcessor):
@@ -255,18 +267,8 @@ class HealthcareAIPipeline:
         if patient_data:
             self.workflow.update_patient_data(patient_data)
         
-        # SAFE RTVI INITIALIZATION
-        self.rtvi = None
-        if RTVI_AVAILABLE:
-            try:
-                self.rtvi = RTVIProcessor(config=RTVIConfig(config=[]))
-                logger.info("✅ RTVIProcessor created successfully")
-            except Exception as e:
-                logger.error(f"❌ RTVIProcessor creation failed: {e}")
-                self.rtvi = None
-        else:
-            logger.info("🔄 RTVI not available, using existing transcript system")
-        
+        # DISABLED RTVI FOR NOW - TESTING BASELINE
+        logger.info("🔄 RTVI temporarily disabled for debugging - using baseline system")
         self.transcript_processor = TranscriptProcessor()
         
     def create_pipeline(self, url: str, token: str, room_name: str) -> Pipeline:
@@ -310,6 +312,7 @@ class HealthcareAIPipeline:
             tools=PATIENT_FUNCTIONS
         )
 
+        # RE-ENABLE CUSTOM TRANSCRIPT HANDLER FOR BASELINE TEST
         @self.transcript_processor.event_handler("on_transcript_update")
         async def handle_transcript_update(processor, frame):
             logger.info(f"🔍 DEBUG: Transcript event handler called with {len(frame.messages)} messages")
@@ -329,10 +332,11 @@ class HealthcareAIPipeline:
                     data = json.dumps(transcript_entry)
                     logger.info(f"🔍 DEBUG: Serialized transcript data: {data}")
                     
+                    # ENSURE WE'RE SENDING BYTES
                     message_frame = TransportMessageFrame(
-                        message=data.encode('utf-8')
+                        message=data.encode('utf-8')  # This should be bytes
                     )
-                    logger.info(f"🔍 DEBUG: Created TransportMessageFrame with {len(data.encode('utf-8'))} bytes")
+                    logger.info(f"🔍 DEBUG: Created TransportMessageFrame with {len(data.encode('utf-8'))} bytes, type={type(message_frame.message)}")
                     
                     await self.pipeline.push_frame(message_frame)
                     logger.info(f"✅ DEBUG: Successfully pushed frame to pipeline")
@@ -368,19 +372,9 @@ class HealthcareAIPipeline:
             )
         )
 
-        # BUILD PIPELINE COMPONENTS SAFELY
-        pipeline_components = [
+        # BASELINE PIPELINE WITHOUT RTVI
+        self.pipeline = Pipeline([
             self.transport.input(),
-        ]
-        
-        # Only add RTVI if it was created successfully
-        if self.rtvi is not None:
-            pipeline_components.append(self.rtvi)
-            logger.info("✅ Added RTVIProcessor to pipeline")
-        else:
-            logger.info("🔄 Skipping RTVIProcessor (not available)")
-        
-        pipeline_components.extend([
             AudioResampler(),
             DropEmptyAudio(),
             InputAudioLogger(),
@@ -397,35 +391,25 @@ class HealthcareAIPipeline:
             OutputTTSLogger(),
             self.transcript_processor.assistant(),
             context_aggregators.assistant(),
+            TransportDebugLogger(),  # NEW: Debug transport messages
             self.transport.output()
         ])
         
-        self.pipeline = Pipeline(pipeline_components)
-        logger.info("Healthcare pipeline created successfully with workflow integration")
+        logger.info("Healthcare pipeline created successfully - BASELINE VERSION")
         return self.pipeline
     
     async def run(self, url: str, token: str, room_name: str):
         if not self.pipeline:
             self.create_pipeline(url, token, room_name)
         
-        # CONDITIONALLY add RTVIObserver
-        observers = []
-        if self.rtvi is not None and RTVI_AVAILABLE:
-            try:
-                observers.append(RTVIObserver(self.rtvi))
-                logger.info("✅ Added RTVIObserver to task")
-            except Exception as e:
-                logger.error(f"❌ RTVIObserver creation failed: {e}")
-        else:
-            logger.info("🔄 Skipping RTVIObserver (RTVI not available)")
-        
+        # NO RTVI OBSERVERS FOR NOW
         task = PipelineTask(
             self.pipeline,
             params=PipelineParams(
                 allow_interruptions=True,
                 enable_metrics=True,
             ),
-            observers=observers,  # Will be empty list if RTVI failed
+            observers=[],  # Empty for baseline test
             conversation_id=self.session_id
         )
         
