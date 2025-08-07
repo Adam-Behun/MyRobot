@@ -320,36 +320,46 @@
             
             console.log('🔍 DEBUG: Setting up transcript listener');
             
-            // Listen for real-time data messages containing transcripts
-            room.on(LiveKitClient.RoomEvent.DataReceived, (data, participant) => {
-                console.log('🔍 DEBUG: Data received from participant:', participant?.identity);
-                console.log('🔍 DEBUG: Raw data length:', data.length);
+            // Listen for ALL data messages first
+            room.on(LiveKitClient.RoomEvent.DataReceived, (payload, participant, kind, topic) => {
+                console.log('🚨 RAW DATA RECEIVED:');
+                console.log('  - Participant:', participant?.identity);
+                console.log('  - Kind:', kind);
+                console.log('  - Topic:', topic);
+                console.log('  - Payload length:', payload.length);
+                console.log('  - Payload type:', typeof payload);
+                console.log('  - Payload constructor:', payload.constructor.name);
                 
                 try {
-                    const decoded = new TextDecoder().decode(data);
-                    console.log('🔍 DEBUG: Decoded data:', decoded);
+                    const decoded = new TextDecoder().decode(payload);
+                    console.log('  - Decoded string:', decoded);
                     
                     const transcriptData = JSON.parse(decoded);
-                    console.log('🔍 DEBUG: Parsed transcript data:', transcriptData);
+                    console.log('  - Parsed JSON:', transcriptData);
                     
-                    if (transcriptData.role && transcriptData.content) {
+                    // Check if it's a transcript
+                    if (transcriptData.type === 'transcript' && transcriptData.role && transcriptData.content) {
+                        console.log('✅ VALID TRANSCRIPT FOUND');
                         const speaker = transcriptData.role === 'user' ? 'Insurance Agent' : 'Provider Agent';
                         const isUser = transcriptData.role === 'user';
                         addTranscriptMessage(speaker, transcriptData.content, isUser);
                         log(`📝 Transcript: ${speaker} - "${transcriptData.content.slice(0, 50)}..."`);
-                        console.log('✅ DEBUG: Successfully added transcript message');
                     } else {
-                        console.log('⚠️ DEBUG: Invalid transcript data structure');
+                        console.log('⚠️ NOT A TRANSCRIPT:', {
+                            hasType: !!transcriptData.type,
+                            hasRole: !!transcriptData.role,
+                            hasContent: !!transcriptData.content,
+                            type: transcriptData.type
+                        });
                     }
                 } catch (error) {
-                    console.log('⚠️ DEBUG: Error parsing data (might not be transcript):', error.message);
-                    console.log('⚠️ DEBUG: Raw data as string:', new TextDecoder().decode(data));
+                    console.error('❌ PARSE ERROR:', error.message);
+                    console.log('❌ Raw bytes:', Array.from(payload).slice(0, 50));
                 }
             });
             
             document.getElementById('transcriptStatus').textContent = 'Transcript: Connected';
             log('📝 Real-time transcript listener active');
-            console.log('✅ DEBUG: Transcript listener setup complete');
         }
 
         function cleanupTranscriptHandler() {
@@ -600,6 +610,14 @@
                 });
 
                 await room.connect(sessionData.room_url, sessionData.user_token);
+                room.on(LiveKitClient.RoomEvent.DataReceived, (payload, participant) => {
+                    console.log('🔥 ANY DATA RECEIVED AT ALL:', {
+                        participantId: participant?.identity,
+                        dataLength: payload.length
+                    });
+                });
+
+                console.log('✅ Room connected, data listener registered');
 
                 try {
                     localAudioTrack = await LiveKitClient.createLocalAudioTrack({
@@ -670,30 +688,6 @@
             }
         }
 
-        function setupTranscriptListener() {
-            if (!room) return;
-            
-            // Listen for real-time data messages containing transcripts
-            room.on(LiveKitClient.RoomEvent.DataReceived, (data, participant) => {
-                try {
-                    const transcriptData = JSON.parse(new TextDecoder().decode(data));
-                    
-                    if (transcriptData.role && transcriptData.content) {
-                        const speaker = transcriptData.role === 'user' ? 'Insurance Agent' : 'Provider Agent';
-                        const isUser = transcriptData.role === 'user';
-                        addTranscriptMessage(speaker, transcriptData.content, isUser);
-                        log(`Transcript: ${speaker} - "${transcriptData.content.slice(0, 50)}..."`);
-                    }
-                } catch (error) {
-                    // Ignore non-transcript data messages
-                }
-            });
-            
-            document.getElementById('transcriptStatus').textContent = 'Transcript: Connected';
-            log('Real-time transcript listener active');
-        }
-
-        // Initialize
         log('Prior Authorization AI Test Client loaded - Select a patient to start');
     </script>
 </body>

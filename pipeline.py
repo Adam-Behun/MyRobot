@@ -10,20 +10,7 @@ from pipecat.services.openai.llm import OpenAILLMService
 from pipecat.services.elevenlabs.tts import ElevenLabsTTSService
 from pipecat.frames.frames import TransportMessageFrame
 from pipecat.processors.transcript_processor import TranscriptProcessor
-
-# SAFE RTVI IMPORTS - BUT NOT USING YET
-try:
-    from pipecat.processors.frameworks.rtvi import RTVIProcessor, RTVIConfig, RTVIObserver
-    RTVI_AVAILABLE = True
-    print("✅ RTVI imports successful")
-except ImportError as e:
-    print(f"❌ RTVI import failed: {e}")
-    RTVIProcessor = None
-    RTVIObserver = None
-    RTVIConfig = None
-    RTVI_AVAILABLE = False
-
-from pipecat.transports.services.livekit import LiveKitTransport, LiveKitParams
+from pipecat.transports.services.livekit import LiveKitTransport, LiveKitParams, LiveKitTransportMessageFrame
 from pipecat.audio.utils import create_stream_resampler
 from pipecat.processors.frame_processor import FrameDirection
 from pipecat.processors.aggregators.openai_llm_context import OpenAILLMContext
@@ -230,17 +217,20 @@ class OutputTTSLogger(FrameProcessor):
             logger.error(f"[{datetime.now().isoformat()}] ERROR: No audio output after TTS - {type(frame).__name__}")
         await self.push_frame(frame, direction)
 
-# NEW: Debug what's going to the transport
 class TransportDebugLogger(FrameProcessor):
     async def process_frame(self, frame: Frame, direction: FrameDirection):
         await super().process_frame(frame, direction)
-        if isinstance(frame, TransportMessageFrame):
+        # Import the LiveKit frame type for checking
+        from pipecat.transports.services.livekit import LiveKitTransportMessageFrame
+        
+        if isinstance(frame, (TransportMessageFrame, LiveKitTransportMessageFrame)):
             logger.info(f"🔍 TRANSPORT DEBUG: Frame type={type(frame).__name__}, message type={type(frame.message)}")
-            if hasattr(frame.message, 'encode'):
-                logger.info(f"🔍 TRANSPORT DEBUG: Message has encode method, type={type(frame.message)}")
+            if hasattr(frame.message, 'encode') or isinstance(frame.message, str):
+                logger.info(f"✅ TRANSPORT DEBUG: Message is string/encodable, type={type(frame.message)}")
             else:
-                logger.error(f"❌ TRANSPORT DEBUG: Message does NOT have encode method! Type={type(frame.message)}, Value={frame.message}")
+                logger.error(f"❌ TRANSPORT DEBUG: Message is not string! Type={type(frame.message)}, Value={frame.message}")
         await self.push_frame(frame, direction)
+
 # ********** DEBUG LOGGING END **********
 
 class WorkflowAwareLLMContext(FrameProcessor):
@@ -263,13 +253,10 @@ class HealthcareAIPipeline:
         self.patient_id = patient_id
         self.patient_data = patient_data
         self.workflow = PriorAuthWorkflow(patient_id=patient_id)
-        self.transcripts = []   
+        self.transcripts = []
+        self.transcript_processor = TranscriptProcessor()
         if patient_data:
             self.workflow.update_patient_data(patient_data)
-        
-        # DISABLED RTVI FOR NOW - TESTING BASELINE
-        logger.info("🔄 RTVI temporarily disabled for debugging - using baseline system")
-        self.transcript_processor = TranscriptProcessor()
         
     def create_pipeline(self, url: str, token: str, room_name: str) -> Pipeline:
         logger.info(f"Creating healthcare pipeline for room: {room_name}")
@@ -312,38 +299,42 @@ class HealthcareAIPipeline:
             tools=PATIENT_FUNCTIONS
         )
 
-        # RE-ENABLE CUSTOM TRANSCRIPT HANDLER FOR BASELINE TEST
+
         @self.transcript_processor.event_handler("on_transcript_update")
         async def handle_transcript_update(processor, frame):
-            logger.info(f"🔍 DEBUG: Transcript event handler called with {len(frame.messages)} messages")
+            logger.info(f"📝 Transcript event handler called with {len(frame.messages)} messages")
             
             for message in frame.messages:
-                logger.info(f"🔍 DEBUG: Processing message - Role: {message.role}, Content: '{message.content[:50]}...', Timestamp: {message.timestamp}")
+                logger.info(f"📝 Processing message - Role: {message.role}, Content: '{message.content[:50]}...', Timestamp: {message.timestamp}")
                 
                 transcript_entry = {
                     "role": message.role,
                     "content": message.content,
-                    "timestamp": message.timestamp or datetime.now().isoformat()
+                    "timestamp": message.timestamp or datetime.now().isoformat(),
+                    "type": "transcript"
                 }
                 self.transcripts.append(transcript_entry)
                 logger.info(f"📝 Transcript: [{transcript_entry['timestamp']}] {transcript_entry['role']}: {transcript_entry['content']}")
                 
                 try:
                     data = json.dumps(transcript_entry)
-                    logger.info(f"🔍 DEBUG: Serialized transcript data: {data}")
+                    logger.info(f"📡 Sending transcript via LiveKit transport: {data}")
                     
-                    # ENSURE WE'RE SENDING BYTES
-                    message_frame = TransportMessageFrame(
-                        message=data.encode('utf-8')  # This should be bytes
-                    )
-                    logger.info(f"🔍 DEBUG: Created TransportMessageFrame with {len(data.encode('utf-8'))} bytes, type={type(message_frame.message)}")
+                    # FIX: Access the transport's output client directly
+                    transport_client = self.transport._output._client if self.transport._output else None
                     
-                    await self.pipeline.push_frame(message_frame)
-                    logger.info(f"✅ DEBUG: Successfully pushed frame to pipeline")
-                    
+                    if transport_client:
+                        logger.info(f"🔍 Transport client found, calling send_data directly")
+                        await transport_client.send_data(data.encode('utf-8'))
+                        logger.info(f"✅ Successfully sent transcript via transport client")
+                    else:
+                        logger.error(f"❌ Transport client not available")
+                        logger.info(f"🔍 Transport: {self.transport}")
+                        logger.info(f"🔍 Transport output: {getattr(self.transport, '_output', 'No _output')}")
+                        
                 except Exception as e:
-                    logger.error(f"❌ DEBUG: Error in transcript handler: {str(e)}")
-                    logger.error(f"❌ DEBUG: Exception traceback: {traceback.format_exc()}")
+                    logger.error(f"❌ Error sending transcript: {str(e)}")
+                    logger.error(f"❌ Traceback: {traceback.format_exc()}")
 
         def create_handler(handler):
             async def wrapped(params: FunctionCallParams, **kwargs):
@@ -372,7 +363,6 @@ class HealthcareAIPipeline:
             )
         )
 
-        # BASELINE PIPELINE WITHOUT RTVI
         self.pipeline = Pipeline([
             self.transport.input(),
             AudioResampler(),
@@ -402,7 +392,6 @@ class HealthcareAIPipeline:
         if not self.pipeline:
             self.create_pipeline(url, token, room_name)
         
-        # NO RTVI OBSERVERS FOR NOW
         task = PipelineTask(
             self.pipeline,
             params=PipelineParams(
