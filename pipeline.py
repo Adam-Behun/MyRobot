@@ -4,22 +4,20 @@ from pipecat.pipeline.runner import PipelineRunner
 from pipecat.pipeline.task import PipelineTask, PipelineParams
 from pipecat.audio.vad.silero import SileroVADAnalyzer
 from pipecat.audio.vad.vad_analyzer import VADParams
-from pipecat.processors.frame_processor import FrameProcessor
+from pipecat.processors.frame_processor import FrameProcessor, FrameDirection
 from pipecat.services.deepgram.stt import DeepgramSTTService
 from pipecat.services.openai.llm import OpenAILLMService
 from pipecat.services.elevenlabs.tts import ElevenLabsTTSService
-from pipecat.frames.frames import TransportMessageFrame
 from pipecat.processors.transcript_processor import TranscriptProcessor
-from pipecat.transports.services.livekit import LiveKitTransport, LiveKitParams, LiveKitTransportMessageFrame
-from pipecat.audio.utils import create_stream_resampler
-from pipecat.processors.frame_processor import FrameDirection
+from pipecat.transports.services.livekit import LiveKitTransport, LiveKitParams
 from pipecat.processors.aggregators.openai_llm_context import OpenAILLMContext
-from pipecat.services.llm_service import FunctionCallParams
-
-# Import the functions we need
-from functions import PATIENT_FUNCTIONS, FUNCTION_REGISTRY
-
+from pipecat_flows import FlowManager
 from deepgram import LiveOptions
+
+# Local imports
+from audio_processors import AudioResampler, DropEmptyAudio
+from flow_nodes import create_initial_node
+from functions import PATIENT_FUNCTIONS
 
 import os
 import sys
@@ -29,234 +27,48 @@ import traceback
 from typing import Dict, Any, Optional
 from dotenv import load_dotenv
 from datetime import datetime
-from enum import Enum
-import audioop
 
 load_dotenv()
 
-logging.basicConfig(level=logging.DEBUG)
-logger = logging.getLogger(__name__)
-
-class PriorAuthWorkflow:
-    """Simple workflow manager for prior authorization conversations"""
+def setup_logging(level=logging.INFO):
+    """Configure logging for the pipeline"""
+    logger = logging.getLogger(__name__)
+    logger.setLevel(level)
     
-    def __init__(self, patient_id: str = None):
-        self.patient_id = patient_id
-        self.patient_data = None
-
-    def update_patient_data(self, patient_data: Dict[str, Any]):
-        """Update the patient data for this workflow"""
-        self.patient_data = patient_data
-
-    def get_system_prompt(self) -> str:
-        patient_info = ""
-        if self.patient_data:
-            # Format patient data for the LLM
-            patient_info = f"""
+    if not logger.handlers:
+        handler = logging.StreamHandler()
+        formatter = logging.Formatter(
+            '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+        )
+        handler.setFormatter(formatter)
+        logger.addHandler(handler)
     
-        # Current Patient Information
-        You are calling about the following patient:
-        - Patient Name: {self.patient_data.get('patient_name', 'N/A')}
-        - Date of Birth: {self.patient_data.get('date_of_birth', 'N/A')}
-        - Policy Number: {self.patient_data.get('policy_number', 'N/A')}
-        - Insurance Company: {self.patient_data.get('insurance_company_name', 'N/A')}
-        - Facility: {self.patient_data.get('facility_name', 'N/A')}
-        - Prior Auth Status: {self.patient_data.get('prior_auth_status', 'N/A')}
-        - Appointment Time: {self.patient_data.get('appointment_time', 'N/A')}
+    return logger
 
-        **IMPORTANT FOR FUNCTION CALLS:**
-        - Patient ID for database updates: {self.patient_data.get('_id', 'N/A')}
-        - When calling update_prior_auth_status, use this exact patient_id: "{self.patient_data.get('_id', 'N/A')}"
-        
-        Full Patient Record (for reference):
-        {str(self.patient_data)}
-        """
-        
-            base_prompt = f"""
-        # Role and Objective
-        You are Alexandra, an agent initiating and leading eligibility verification calls with insurance companies on behalf of Adam's Medical Practice. 
-        Your objective is to verify patient's eligibility and benefits proactively, gather all necessary details, and resolve the query completely before ending the call.
-
-        # Instructions
-        - Always start by introducing yourself, your organization, and the call's purpose (e.g., "Hello, this is Alexandra calling from Adam's Medical Practice to verify eligibility and benefits for a patient.").
-        - Maintain your role as the caller: Never respond as the receiver (e.g., do not say "How can I assist you?").
-        - Be professional, empathetic, and HIPAA-compliant: Limit to essential PHI (e.g., DOB, policy number); anonymize where possible.
-        - Use a concise, natural tone. Persist in gathering information with targeted follow-ups (e.g., "Could you clarify the deductible for this procedure?").
-        - Reference prior responses to maintain state and advance logically.
-
-        # Reasoning Steps (Follow These for Every Response)
-        1. Analyze the insurance representative's input and current state.
-        2. Plan step-by-step: What information is needed next? Which tool, if any, to call? 
-        3. Reflect on prior steps: Does this align with collected info and patient data?
-        4. Formulate response: Acknowledge input, reaffirm role, advance purpose, ask follow-ups if needed.
-
-        # Output Format
-        - Always output a concise response in natural language.
-        - If calling a tool, include a message explaining the action (e.g., "Updating status now.") before and after the call.
-        - End with tool call only when ready to finalize (e.g., update_prior_auth_status).
-
-        # Examples
-        ## Example 1: Greeting
-        Insurance: Hi, how can I help?
-        Response: Hello, this is Alexandra from Adam's Medical Practice calling to verify eligibility and benefits for a patient.
-
-        ## Example 2: Providing Details
-        Insurance: Can you confirm the patient's name?
-        Response: Our patient's name is [Patient Name from data]. Date of birth is [DOB from data].
-        {patient_info}
-        """
-        
-        return base_prompt
-    
-class AudioResampler(FrameProcessor):
-    def __init__(self, target_sample_rate: int = 16000, target_channels: int = 1, **kwargs):
-        super().__init__(**kwargs)
-        self._resampler = create_stream_resampler()
-        self.target_sample_rate = target_sample_rate
-        self.target_channels = target_channels
-
-    async def process_frame(self, frame: Frame, direction: FrameDirection):
-        await super().process_frame(frame, direction)
-        if isinstance(frame, AudioRawFrame):
-            audio = frame.audio
-            sample_rate = frame.sample_rate
-            channels = frame.num_channels
-            sample_width = 2
-
-            if channels > 1:
-                audio = audioop.tomono(audio, sample_width, 0.5, 0.5)
-                channels = 1
-
-            if sample_rate != self.target_sample_rate:
-                audio = await self._resampler.resample(audio, sample_rate, self.target_sample_rate)
-
-            new_frame = AudioRawFrame(
-                audio=audio,
-                sample_rate=self.target_sample_rate,
-                num_channels=channels
-            )
-            
-            for attr in ['pts', 'transport_destination', 'id']:
-                if hasattr(frame, attr):
-                    setattr(new_frame, attr, getattr(frame, attr))
-            
-            await self.push_frame(new_frame, direction)
-        else:
-            await self.push_frame(frame, direction)
-
-class DropEmptyAudio(FrameProcessor):
-    def __init__(self, **kwargs):
-        super().__init__(**kwargs)
-
-    async def process_frame(self, frame: Frame, direction: FrameDirection):
-        await super().process_frame(frame, direction)
-        if isinstance(frame, AudioRawFrame) and len(frame.audio) == 0:
-            return
-        await self.push_frame(frame, direction)
+logger = setup_logging(logging.DEBUG if os.getenv("DEBUG") else logging.INFO)
 
 class CustomPipelineRunner(PipelineRunner):
     def _setup_sigint(self):
         if sys.platform == 'win32':
-            logger.warning("Signal handling not supported on Windows. Use task manager or endpoint to end sessions.")
+            logger.warning("Signal handling not supported on Windows")
             return
         super()._setup_sigint()
 
-# ********** DEBUG LOGGING START **********
-class InputAudioLogger(FrameProcessor):
-    async def process_frame(self, frame: Frame, direction: FrameDirection):
-        await super().process_frame(frame, direction)
-        if isinstance(frame, AudioRawFrame):
-            logger.debug(f"[{datetime.now().isoformat()}] SUCCESS: Audio input before Deepgram - {len(frame.audio)} bytes, sample_rate={frame.sample_rate}")
-        else:
-            logger.warning(f"[{datetime.now().isoformat()}] WARNING: Unexpected frame before Deepgram - {type(frame).__name__}")
-        await self.push_frame(frame, direction)
-
-class OutputSTTLogger(FrameProcessor):
-    async def process_frame(self, frame: Frame, direction: FrameDirection):
-        await super().process_frame(frame, direction)
-        if isinstance(frame, TextFrame) and frame.text:
-            logger.debug(f"[{datetime.now().isoformat()}] SUCCESS: Transcribed text after Deepgram - '{frame.text[:100]}...'")
-        else:
-            logger.error(f"[{datetime.now().isoformat()}] ERROR: No valid text output after Deepgram - {type(frame).__name__}")
-        await self.push_frame(frame, direction)
-
-class InputLLMLogger(FrameProcessor):
-    async def process_frame(self, frame: Frame, direction: FrameDirection):
-        await super().process_frame(frame, direction)
-        if isinstance(frame, LLMMessagesFrame) and frame.messages:
-            last_msg = frame.messages[-1].get('content', '')[:100]
-            logger.debug(f"[{datetime.now().isoformat()}] SUCCESS: Messages before LLM - Last content: '{last_msg}...'")
-        else:
-            logger.warning(f"[{datetime.now().isoformat()}] WARNING: Invalid input before LLM - {type(frame).__name__}")
-        await self.push_frame(frame, direction)
-
-class OutputLLMLogger(FrameProcessor):
-    async def process_frame(self, frame: Frame, direction: FrameDirection):
-        await super().process_frame(frame, direction)
-        if isinstance(frame, TextFrame) and frame.text:
-            logger.debug(f"[{datetime.now().isoformat()}] SUCCESS: Response text after LLM - '{frame.text[:100]}...'")
-        else:
-            logger.error(f"[{datetime.now().isoformat()}] ERROR: No text output after LLM - {type(frame).__name__}")
-        await self.push_frame(frame, direction)
-
-class InputTTSLogger(FrameProcessor):
-    async def process_frame(self, frame: Frame, direction: FrameDirection):
-        await super().process_frame(frame, direction)
-        if isinstance(frame, TextFrame) and frame.text:
-            logger.debug(f"[{datetime.now().isoformat()}] SUCCESS: Text input before TTS - '{frame.text[:100]}...'")
-        else:
-            logger.warning(f"[{datetime.now().isoformat()}] WARNING: Invalid input before TTS - {type(frame).__name__}")
-        await self.push_frame(frame, direction)
-
-class OutputTTSLogger(FrameProcessor):
-    async def process_frame(self, frame: Frame, direction: FrameDirection):
-        await super().process_frame(frame, direction)
-        if isinstance(frame, TTSAudioRawFrame) and frame.audio:
-            logger.debug(f"[{datetime.now().isoformat()}] SUCCESS: Audio output after TTS - {len(frame.audio)} bytes, sample_rate={frame.sample_rate}")
-        else:
-            logger.error(f"[{datetime.now().isoformat()}] ERROR: No audio output after TTS - {type(frame).__name__}")
-        await self.push_frame(frame, direction)
-
-class TransportDebugLogger(FrameProcessor):
-    async def process_frame(self, frame: Frame, direction: FrameDirection):
-        await super().process_frame(frame, direction)
-        # Import the LiveKit frame type for checking
-        from pipecat.transports.services.livekit import LiveKitTransportMessageFrame
-        
-        if isinstance(frame, (TransportMessageFrame, LiveKitTransportMessageFrame)):
-            logger.info(f"🔍 TRANSPORT DEBUG: Frame type={type(frame).__name__}, message type={type(frame.message)}")
-            if hasattr(frame.message, 'encode') or isinstance(frame.message, str):
-                logger.info(f"✅ TRANSPORT DEBUG: Message is string/encodable, type={type(frame.message)}")
-            else:
-                logger.error(f"❌ TRANSPORT DEBUG: Message is not string! Type={type(frame.message)}, Value={frame.message}")
-        await self.push_frame(frame, direction)
-
-# ********** DEBUG LOGGING END **********
-
-class WorkflowAwareLLMContext(FrameProcessor):
-    """Frame processor that maintains workflow context"""
-    
-    def __init__(self, workflow: PriorAuthWorkflow, **kwargs):
-        super().__init__(**kwargs)
-        self.workflow = workflow
-
-    async def process_frame(self, frame: Frame, direction: FrameDirection):
-        await super().process_frame(frame, direction)
-        await self.push_frame(frame, direction)
-
 class HealthcareAIPipeline:
-    def __init__(self, session_id: str = "default", patient_id: str = None, patient_data: Optional[Dict[str, Any]] = None):
+    def __init__(self, session_id: str = "default", patient_id: str = None, 
+                 patient_data: Optional[Dict[str, Any]] = None, debug_mode: bool = False):
         self.transport = None
         self.pipeline = None
         self.runner = None
         self.session_id = session_id
         self.patient_id = patient_id
         self.patient_data = patient_data
-        self.workflow = PriorAuthWorkflow(patient_id=patient_id)
         self.transcripts = []
         self.transcript_processor = TranscriptProcessor()
-        if patient_data:
-            self.workflow.update_patient_data(patient_data)
+        self.flow_manager = None
+        self.debug_mode = debug_mode
+        self.llm = None
+        self.context_aggregators = None
         
     def create_pipeline(self, url: str, token: str, room_name: str) -> Pipeline:
         logger.info(f"Creating healthcare pipeline for room: {room_name}")
@@ -289,24 +101,47 @@ class HealthcareAIPipeline:
             )
         )
         
-        initial_messages = [
-            {"role": "system", "content": self.workflow.get_system_prompt()},
-        ]
-        
-        llm = OpenAILLMService(
+        self.llm = OpenAILLMService(
             api_key=os.getenv("OPENAI_API_KEY"),
-            model="gpt-4.1-nano-2025-04-14",
+            model="gpt-4o-mini",  # Use standard model name
             tools=PATIENT_FUNCTIONS
         )
 
+        self._setup_transcript_handler()
 
+        llm_context = OpenAILLMContext(messages=[])
+        self.context_aggregators = self.llm.create_context_aggregator(llm_context)
+        
+        tts = ElevenLabsTTSService(
+            api_key=os.getenv("ELEVENLABS_API_KEY"),
+            voice_id="FGY2WhTYpPnrIDTdsKH5",
+            model="eleven_turbo_v2_5"
+        )
+
+        # Build pipeline
+        pipeline_components = [
+            self.transport.input(),
+            AudioResampler(),
+            DropEmptyAudio(),
+            stt,
+            self.transcript_processor.user(),
+            self.context_aggregators.user(),
+            self.llm,
+            tts,
+            self.transcript_processor.assistant(),
+            self.context_aggregators.assistant(),
+            self.transport.output()
+        ]
+
+        self.pipeline = Pipeline(pipeline_components)
+        logger.info("Healthcare pipeline created successfully with Pipecat Flows")
+        return self.pipeline
+
+    def _setup_transcript_handler(self):
+        """Setup transcript event handler"""
         @self.transcript_processor.event_handler("on_transcript_update")
         async def handle_transcript_update(processor, frame):
-            logger.info(f"📝 Transcript event handler called with {len(frame.messages)} messages")
-            
             for message in frame.messages:
-                logger.info(f"📝 Processing message - Role: {message.role}, Content: '{message.content[:50]}...', Timestamp: {message.timestamp}")
-                
                 transcript_entry = {
                     "role": message.role,
                     "content": message.content,
@@ -314,79 +149,16 @@ class HealthcareAIPipeline:
                     "type": "transcript"
                 }
                 self.transcripts.append(transcript_entry)
-                logger.info(f"📝 Transcript: [{transcript_entry['timestamp']}] {transcript_entry['role']}: {transcript_entry['content']}")
+                logger.info(f"Transcript: [{transcript_entry['timestamp']}] {transcript_entry['role']}: {transcript_entry['content'][:50]}...")
                 
-                try:
-                    data = json.dumps(transcript_entry)
-                    logger.info(f"📡 Sending transcript via LiveKit transport: {data}")
-                    
-                    # FIX: Access the transport's output client directly
-                    transport_client = self.transport._output._client if self.transport._output else None
-                    
-                    if transport_client:
-                        logger.info(f"🔍 Transport client found, calling send_data directly")
+                # Send via transport if available
+                transport_client = self.transport._output._client if self.transport._output else None
+                if transport_client:
+                    try:
+                        data = json.dumps(transcript_entry)
                         await transport_client.send_data(data.encode('utf-8'))
-                        logger.info(f"✅ Successfully sent transcript via transport client")
-                    else:
-                        logger.error(f"❌ Transport client not available")
-                        logger.info(f"🔍 Transport: {self.transport}")
-                        logger.info(f"🔍 Transport output: {getattr(self.transport, '_output', 'No _output')}")
-                        
-                except Exception as e:
-                    logger.error(f"❌ Error sending transcript: {str(e)}")
-                    logger.error(f"❌ Traceback: {traceback.format_exc()}")
-
-        def create_handler(handler):
-            async def wrapped(params: FunctionCallParams, **kwargs):
-                result = await handler(**kwargs)
-                await params.result_callback(result)
-            return wrapped
-        
-        for name, handler in FUNCTION_REGISTRY.items():
-            llm.register_function(name, create_handler(handler))
-
-        llm_context = OpenAILLMContext(messages=initial_messages)
-        context_aggregators = llm.create_context_aggregator(llm_context)
-        
-        tts = ElevenLabsTTSService(
-            api_key=os.getenv("ELEVENLABS_API_KEY"),
-            voice_id="FGY2WhTYpPnrIDTdsKH5",
-            model="eleven_turbo_v2_5",
-            params=ElevenLabsTTSService.InputParams(
-                stability=0.75,  
-                similarity_boost=0.8, 
-                style=0.1,  
-                use_speaker_boost=True, 
-                speed=1.0, 
-                auto_mode=True,  
-                enable_ssml_parsing=True  
-            )
-        )
-
-        self.pipeline = Pipeline([
-            self.transport.input(),
-            AudioResampler(),
-            DropEmptyAudio(),
-            InputAudioLogger(),
-            stt,
-            OutputSTTLogger(),
-            self.transcript_processor.user(),
-            context_aggregators.user(),
-            InputLLMLogger(),
-            WorkflowAwareLLMContext(self.workflow),
-            llm,
-            OutputLLMLogger(),
-            InputTTSLogger(),
-            tts,
-            OutputTTSLogger(),
-            self.transcript_processor.assistant(),
-            context_aggregators.assistant(),
-            TransportDebugLogger(),  # NEW: Debug transport messages
-            self.transport.output()
-        ])
-        
-        logger.info("Healthcare pipeline created successfully - BASELINE VERSION")
-        return self.pipeline
+                    except Exception as e:
+                        logger.error(f"Error sending transcript: {e}")
     
     async def run(self, url: str, token: str, room_name: str):
         if not self.pipeline:
@@ -398,12 +170,23 @@ class HealthcareAIPipeline:
                 allow_interruptions=True,
                 enable_metrics=True,
             ),
-            observers=[],  # Empty for baseline test
             conversation_id=self.session_id
         )
         
-        self.runner = CustomPipelineRunner()
+        # Create FlowManager
+        self.flow_manager = FlowManager(
+            task=task,
+            llm=self.llm,
+            context_aggregator=self.context_aggregators
+        )
         
+        # Initialize flow with patient data
+        if self.flow_manager and self.patient_data:
+            initial_node = create_initial_node(self.patient_data)
+            await self.flow_manager.initialize(initial_node)
+            logger.info("Flow initialized with patient data")
+        
+        self.runner = CustomPipelineRunner()
         logger.info(f"Starting healthcare pipeline for session: {self.session_id}")
         
         try:
@@ -414,9 +197,14 @@ class HealthcareAIPipeline:
 
     def get_conversation_state(self):
         """Get current conversation state"""
+        if self.flow_manager and hasattr(self.flow_manager, 'state'):
+            return {
+                "workflow_state": "active",
+                "patient_data": self.flow_manager.state.get("patient_data", self.patient_data),
+                "collected_info": self.flow_manager.state.get("collected_info", {})
+            }
         return {
-            "workflow_state": "active",
-            "workflow_context": {},
+            "workflow_state": "inactive",
             "patient_data": self.patient_data,
             "collected_info": {}
         }
