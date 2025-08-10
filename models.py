@@ -27,21 +27,27 @@ class AsyncPatientRecord:
         """Get complete patient record with all information"""
         return await self.find_patient_by_id(patient_id)
     
-    async def update_prior_auth_status(self, patient_id: str, status: str) -> bool:
-        """Update the prior authorization status for a patient"""
+    async def update_prior_auth_status(self, patient_id: str, status: str, reference_number: str = None) -> bool:
+        """Update the prior authorization status and optionally the reference number for a patient"""
         from bson import ObjectId
         try:
+            # Build update document
+            update_doc = {
+                "prior_auth_status": status,
+                "updated_at": datetime.utcnow().isoformat()
+            }
+            
+            # Add reference number if provided
+            if reference_number:
+                update_doc["reference_number"] = reference_number
+            
             result = await self.patients.update_one(
                 {"_id": ObjectId(patient_id)},
-                {
-                    "$set": {
-                        "prior_auth_status": status,
-                        "updated_at": datetime.utcnow().isoformat()
-                    }
-                }
+                {"$set": update_doc}
             )
             return result.modified_count > 0
-        except:
+        except Exception as e:
+            print(f"Error updating patient: {e}")
             return False
     
     async def find_patients_pending_auth(self) -> List[dict]:

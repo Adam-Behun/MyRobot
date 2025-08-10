@@ -16,7 +16,7 @@ from deepgram import LiveOptions
 
 # Local imports
 from audio_processors import AudioResampler, DropEmptyAudio
-from flow_nodes import create_initial_node
+from flow_nodes import create_initial_flow
 from functions import PATIENT_FUNCTIONS
 
 import os
@@ -180,11 +180,20 @@ class HealthcareAIPipeline:
             context_aggregator=self.context_aggregators
         )
         
-        # Initialize flow with patient data
+        # Initialize flow with complete flow structure
         if self.flow_manager and self.patient_data:
-            initial_node = create_initial_node(self.patient_data)
-            await self.flow_manager.initialize(initial_node)
-            logger.info("Flow initialized with patient data")
+            flow_config = create_initial_flow(self.patient_data)
+            
+            # Initialize with the greeting node
+            await self.flow_manager.initialize(flow_config["nodes"]["greeting"])
+            
+            # Store the flow configuration in state
+            self.flow_manager.state["flow_config"] = flow_config
+            self.flow_manager.state["current_node"] = "greeting"
+            self.flow_manager.state["patient_data"] = self.patient_data
+            self.flow_manager.state["collected_info"] = flow_config["context"]["collected_info"]
+            
+            logger.info(f"Flow initialized with greeting node for patient: {self.patient_data.get('patient_name')}")
         
         self.runner = CustomPipelineRunner()
         logger.info(f"Starting healthcare pipeline for session: {self.session_id}")

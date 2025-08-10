@@ -133,7 +133,7 @@ async def get_patients():
         pending_patients = await patient_db.find_patients_pending_auth()
         
         patients = []
-        for patient in pending_patients[:10]:  # Limit to 10 for demo
+        for patient in pending_patients[:10]:
             patients.append({
                 "patient_id": str(patient["_id"]),
                 "patient_name": patient.get("patient_name"),
@@ -151,6 +151,22 @@ async def get_patients():
     except Exception as e:
         logger.error(f"Error getting patients: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/test-flow/{session_id}")
+async def test_flow_state(session_id: str):
+    """Debug endpoint to check flow state"""
+    if session_id not in active_pipelines:
+        raise HTTPException(status_code=404, detail="Session not found")
+    
+    pipeline = active_pipelines[session_id]
+    if pipeline.flow_manager:
+        return {
+            "current_node": pipeline.flow_manager.state.get("current_node"),
+            "collected_info": pipeline.flow_manager.state.get("collected_info"),
+            "patient_id": pipeline.patient_id,
+            "transcripts_count": len(pipeline.transcripts)
+        }
+    return {"error": "No flow manager"}
 
 @app.get("/conversation-state/{session_id}")
 async def get_conversation_state(session_id: str):
