@@ -1,4 +1,5 @@
-pipecat-ai[livekit,silero,elevenlabs, flows]
+pipecat-ai[livekit,silero,elevenlabs]
+pipecat-ai-flows
 openai
 deepgram-sdk
 cartesia
