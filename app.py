@@ -7,6 +7,8 @@ from livekit import api
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse, HTMLResponse
 from pydantic import BaseModel
 from dotenv import load_dotenv
 import uvicorn
@@ -24,6 +26,8 @@ logging.basicConfig(level=logging.DEBUG)
 logger = logging.getLogger(__name__)
 
 app = FastAPI(title="Healthcare AI Agent", version="1.0.0")
+
+app.mount("/static", StaticFiles(directory="static"), name="static")
 
 # Add CORS middleware
 app.add_middleware(
@@ -258,24 +262,20 @@ async def health_check():
 
 @app.get("/")
 async def root():
-    return {
-        "message": "Healthcare AI Agent API - Insurance Verification", 
-        "version": "1.0.0",
-        "features": [
-            "insurance_verification", 
-            "voice_pipeline", 
-            "patient_data_integration",
-            "function_calling",
-            "workflow_management"
-        ],
-        "endpoints": {
-            "start_call": "POST /start-call (requires patient_id)",
-            "patients": "GET /patients (list pending patients)",
-            "conversation_state": "GET /conversation-state/{session_id}",
-            "active_sessions": "GET /active-sessions",
-            "end_call": "POST /end-call/{session_id}"
-        }
-    }
+    """Serve the main application interface"""
+    try:
+        return FileResponse("static/index.html")
+    except FileNotFoundError:
+        # Fallback if file doesn't exist
+        return HTMLResponse("""
+        <html>
+            <body style="font-family: Arial; padding: 40px; text-align: center;">
+                <h1>Prior Authorization Voice Agent</h1>
+                <p>Application is loading...</p>
+                <p>If this persists, please contact support.</p>
+            </body>
+        </html>
+        """)
 
 if __name__ == "__main__":
     # Validate required environment variables
