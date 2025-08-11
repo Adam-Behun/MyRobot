@@ -1,0 +1,45 @@
+# fly.toml - Fly.io Configuration for Healthcare AI Agent
+app = "Prior-Authorization-Voice-AI-Agent"
+primary_region = "ewr"
+kill_signal = "SIGINT"
+kill_timeout = 5
+
+[build]
+  # Use the Dockerfile in the current directory
+  dockerfile = "Dockerfile"
+
+[env]
+  # Non-sensitive environment variables
+  PYTHONUNBUFFERED = "1"
+
+[[services]]
+  protocol = "tcp"
+  internal_port = 8000  # Must match the PORT in your app
+  auto_start_machines = true
+  auto_stop_machines = true
+  min_machines_running = 1  # Keep 1 machine always running to avoid cold starts
+
+  [[services.ports]]
+    port = 80
+    handlers = ["http"]
+    
+  [[services.ports]]
+    port = 443
+    handlers = ["tls", "http"]
+
+  [services.concurrency]
+    type = "requests"
+    hard_limit = 250
+    soft_limit = 200
+
+  [[services.http_checks]]
+    interval = "30s"
+    timeout = "5s"
+    grace_period = "10s"
+    method = "GET"
+    path = "/health"
+
+[vm]
+  # Sufficient for CPU-only workload with Silero VAD
+  size = "shared-cpu-1x"  # 1 shared CPU, 256MB RAM
+  memory = "1gb"  # Override to 1GB RAM for Silero VAD model
