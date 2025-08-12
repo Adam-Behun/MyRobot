@@ -152,6 +152,86 @@
             gap: 15px;
         }
 
+        .demo-instructions {
+            background: linear-gradient(135deg, rgba(102, 126, 234, 0.05) 0%, rgba(118, 75, 162, 0.05) 100%);
+            border: 2px solid #667eea;
+            border-radius: 12px;
+            padding: 20px;
+            margin: 20px 0;
+            animation: slideIn 0.5s ease;
+        }
+
+        @keyframes slideIn {
+            from {
+                opacity: 0;
+                transform: translateY(-20px);
+            }
+            to {
+                opacity: 1;
+                transform: translateY(0);
+            }
+        }
+
+        .demo-instructions h3 {
+            color: #667eea;
+            margin-bottom: 15px;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        .demo-instructions h3::before {
+            content: '🎭';
+            font-size: 1.5rem;
+        }
+
+        .demo-instructions .role-badge {
+            display: inline-block;
+            background: #667eea;
+            color: white;
+            padding: 4px 12px;
+            border-radius: 20px;
+            font-size: 0.85rem;
+            font-weight: 600;
+            margin: 5px 0;
+        }
+
+        .demo-instructions .conversation-example {
+            background: white;
+            border-left: 4px solid #667eea;
+            padding: 15px;
+            margin: 15px 0;
+            border-radius: 8px;
+            font-style: italic;
+            color: #555;
+        }
+
+        .demo-instructions .flow-steps {
+            margin-top: 15px;
+        }
+
+        .demo-instructions .flow-step {
+            display: flex;
+            align-items: flex-start;
+            margin: 10px 0;
+            color: #333;
+        }
+
+        .demo-instructions .flow-step .step-number {
+            background: #667eea;
+            color: white;
+            width: 24px;
+            height: 24px;
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 0.85rem;
+            font-weight: bold;
+            margin-right: 12px;
+            flex-shrink: 0;
+        }
+
         .status-badge {
             display: inline-block;
             padding: 8px 16px;
@@ -303,20 +383,66 @@
             <div class="card">
                 <h2>Control Panel</h2>
                 
-                <!-- Patient Selection -->
-                <div style="margin-bottom: 20px;">
-                    <button class="btn btn-secondary" onclick="loadPatients()">
-                        <span id="loadBtnText">Load Patients</span>
-                    </button>
-                    <span id="patientCount" style="margin-left: 10px; color: #666;"></span>
+                <!-- Patient Selection Section -->
+                <div id="patientSelectionSection">
+                    <div style="margin-bottom: 20px;">
+                        <button class="btn btn-secondary" onclick="loadPatients()">
+                            <span id="loadBtnText">Load Patients</span>
+                        </button>
+                        <span id="patientCount" style="margin-left: 10px; color: #666;"></span>
+                    </div>
+
+                    <div id="patientList" class="patient-list" style="display: none;"></div>
+
+                    <!-- Selected Patient Info -->
+                    <div id="selectedPatientInfo" style="display: none; margin: 20px 0;">
+                        <h3 style="color: #667eea; margin-bottom: 10px;">Selected Patient</h3>
+                        <div id="patientInfoContent" style="padding: 15px; background: #f8f9fa; border-radius: 8px;"></div>
+                    </div>
                 </div>
 
-                <div id="patientList" class="patient-list" style="display: none;"></div>
+                <!-- Demo Instructions (hidden by default) -->
+                <div id="demoInstructions" class="demo-instructions" style="display: none;">
+                    <h3>Demo Role-Play Instructions</h3>
+                    
+                    <div class="role-badge">Your Role: Insurance Representative</div>
+                    
+                    <p style="margin: 15px 0; color: #333;">
+                        In this demo, you'll play the role of an insurance company representative. 
+                        The AI agent will call you to verify patient eligibility and benefits.
+                    </p>
 
-                <!-- Selected Patient Info -->
-                <div id="selectedPatientInfo" style="display: none; margin: 20px 0;">
-                    <h3 style="color: #667eea; margin-bottom: 10px;">Selected Patient</h3>
-                    <div id="patientInfoContent" style="padding: 15px; background: #f8f9fa; border-radius: 8px;"></div>
+                    <div class="conversation-example">
+                        <strong>Start by saying:</strong><br>
+                        "Hi, this is [Your Name] from [Insurance Company], how can I help you today?"
+                    </div>
+
+                    <div class="flow-steps">
+                        <div class="flow-step">
+                            <span class="step-number">1</span>
+                            <span>The AI will introduce itself as Alexandra from Adam's Medical Practice</span>
+                        </div>
+                        <div class="flow-step">
+                            <span class="step-number">2</span>
+                            <span>Ask for any patient information (name, DOB, member ID, CPT code, provider NPI)</span>
+                        </div>
+                        <div class="flow-step">
+                            <span class="step-number">3</span>
+                            <span>Tell the AI whether the procedure is <strong>Approved</strong>, <strong>Denied</strong>, or <strong>Pending</strong></span>
+                        </div>
+                        <div class="flow-step">
+                            <span class="step-number">4</span>
+                            <span>When asked, provide a reference number (any number like "12345" or "AUTH-789")</span>
+                        </div>
+                        <div class="flow-step">
+                            <span class="step-number">5</span>
+                            <span>The AI will update the database and thank you before ending the call</span>
+                        </div>
+                    </div>
+
+                    <p style="margin-top: 15px; font-size: 0.9rem; color: #666;">
+                        <strong>Tip:</strong> The AI will wait for you to speak first, just like a real phone call!
+                    </p>
                 </div>
 
                 <!-- Call Controls -->
@@ -465,6 +591,11 @@
             if (!selectedPatientId) return;
             
             document.getElementById('startCallBtn').disabled = true;
+            
+            // Hide patient selection section and show demo instructions
+            document.getElementById('patientSelectionSection').style.display = 'none';
+            document.getElementById('demoInstructions').style.display = 'block';
+            
             updateStatus('Creating session...', 'connecting');
             
             try {
@@ -485,6 +616,9 @@
                 console.error('Error starting call:', error);
                 updateStatus('Error starting call', 'disconnected');
                 document.getElementById('startCallBtn').disabled = false;
+                // Show patient selection again if error
+                document.getElementById('patientSelectionSection').style.display = 'block';
+                document.getElementById('demoInstructions').style.display = 'none';
             }
         }
 
@@ -528,6 +662,9 @@
             room.on(LiveKitClient.RoomEvent.Disconnected, () => {
                 updateStatus('Disconnected', 'disconnected');
                 resetControls();
+                // Show patient selection again when disconnected
+                document.getElementById('patientSelectionSection').style.display = 'block';
+                document.getElementById('demoInstructions').style.display = 'none';
             });
 
             room.on(LiveKitClient.RoomEvent.ParticipantConnected, (participant) => {
@@ -601,6 +738,10 @@
             }
             resetControls();
             updateStatus('Disconnected', 'disconnected');
+            
+            // Show patient selection again
+            document.getElementById('patientSelectionSection').style.display = 'block';
+            document.getElementById('demoInstructions').style.display = 'none';
         }
 
         function resetControls() {
