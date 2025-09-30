@@ -1,7 +1,9 @@
+# fly.toml app configuration file generated for prior-authorization-voice-agent-divine-shape-1935 on 2025-08-11T16:39:32-04:00
+#
 # See https://fly.io/docs/reference/configuration/ for information about how to use this file.
 #
 
-app = 'prior-auth-agent-v2'
+app = 'prior-authorization-voice-agent-divine-shape-1935'
 primary_region = 'ewr'
 kill_signal = 'SIGINT'
 kill_timeout = '5s'
