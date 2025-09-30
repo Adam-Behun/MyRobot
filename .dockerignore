@@ -1,45 +1,39 @@
 # flyctl launch added from .gitignore
 # Environment variables
-**\.env
-
-**\debug_audio.wav
-**\real1.txt
-**\real2.txt
-**\real3.txt
-**\real4.txt
-**\real5.txt
-**\ThePerfectFineTuningTranscript.txt
-**\14FineTuningExamples.txt
-**\fine-tune
-**\documentation
-**\Notes.md
-
+**/.env
+**/debug_audio.wav
+**/real1.txt
+**/real2.txt
+**/real3.txt
+**/real4.txt
+**/real5.txt
+**/ThePerfectFineTuningTranscript.txt
+**/14FineTuningExamples.txt
+**/fine-tune
+**/documentation
+**/Notes.md
 # Python
-**\__pycache__
-**\*.py[cod]
-**\*$py.class
-**\*.so
-**\.Python
-**\env
-**\venv
-**\ENV
-**\env.bak
-**\venv.bak
-
+**/__pycache__
+**/*.py[cod]
+**/*$py.class
+**/*.so
+**/.Python
+**/env
+**/venv
+**/ENV
+**/env.bak
+**/venv.bak
 # IDE
-**\.vscode
-**\.idea
-**\*.swp
-**\*.swo
-
+**/.vscode
+**/.idea
+**/*.swp
+**/*.swo
 # Logs
-**\*.log
-
+**/*.log
 # Database
-**\*.db
-**\*.sqlite3
-
+**/*.db
+**/*.sqlite3
 # OS
-**\.DS_Store
-**\Thumbs.db
+**/.DS_Store
+**/Thumbs.db
 fly.toml

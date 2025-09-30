@@ -61,6 +61,7 @@ class AsyncPatientRecord:
 def get_async_db_client():
     """Get asynchronous MongoDB client"""
     mongo_uri = os.getenv("MONGO_URI", "mongodb://localhost:27017/")
+    print(f"DEBUG: MONGO_URI = {mongo_uri}")
     return AsyncIOMotorClient(mongo_uri)
 
 # Global async client instance
